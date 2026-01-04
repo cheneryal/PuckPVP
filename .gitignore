@@ -1,0 +1,34 @@
+# --- Unity ---
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+/[Uu]ser[Ss]ettings/
+
+# --- Visual Studio / C# ---
+.vs/
+*.user
+*.userprefs
+*.pidb
+*.suo
+*.sln.docstates
+*.ncrunch*
+_ReSharper*/
+
+# --- Builds & Output ---
+# We generally DO NOT want to track the built DLLs because the CI/CD pipeline should build them.
+# However, if you have 3rd party DLLs (dependencies), you might need to force include them.
+bin/
+obj/
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+
+# --- Mod Specific ---
+# If you have a folder where you dump the game's original DLLs for reference, ignore it
+# so you don't illegally distribute game code.
+libs/
