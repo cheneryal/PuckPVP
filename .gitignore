@@ -27,8 +27,3 @@ obj/
 # --- OS Junk ---
 .DS_Store
 Thumbs.db
-
-# --- Mod Specific ---
-# If you have a folder where you dump the game's original DLLs for reference, ignore it
-# so you don't illegally distribute game code.
-libs/
