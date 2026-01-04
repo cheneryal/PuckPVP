@@ -54,6 +54,7 @@ jobs:
           host: ${{ secrets.SSH_TARGET_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          passphrase: ${{ secrets.SSH_KEY_PASSWORD }}
           # We map the local artifact folder to the remote server folder
           source: build-files/*
           target: /home/user/pubsrv_testing_1/Plugins/CTP/
