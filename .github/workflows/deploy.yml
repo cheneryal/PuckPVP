@@ -6,28 +6,26 @@ on:
 
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest  # CHANGED: Must use Windows for .NET 4.8
 
     steps:
     # 1. Checkout Code
     - name: Checkout code
       uses: actions/checkout@v3
 
-    # 2. Setup .NET
+    # 2. Setup .NET (Use a modern SDK to build the legacy target)
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: 4.8.x
+        dotnet-version: 6.0.x # CHANGED: Uses modern SDK to build your 4.8 project
 
     # 3. Build the Mod
     - name: Build Solution
       run: dotnet build --configuration Release
 
-    # 4. Copy Asset Bundles
+    # 4. Copy Asset Bundles (PowerShell syntax)
     - name: Stage AssetBundles
-      # -r ensures it copies everything even if you have subfolders
-      # Uses 'AssetBundles' to match your root folder name
-      run: cp -r AssetBundles/* bin/Release/net4.8/
+      run: Copy-Item -Path "AssetBundles\*" -Destination "bin\Release\net4.8\" -Recurse -Force
 
     # 5. Deploy to FTP Server
     - name: FTP Deploy
