@@ -60,7 +60,7 @@ public class CaptureThePuck_Mod : IPuckMod
 
 public static class HP_Mechanic_Patches
 {
-    // 1. Attach Health Manager to the PLAYER
+    // 1. Attach Health Manager to PLAYER
     [HarmonyPatch(typeof(Player), "OnNetworkSpawn")]
     public static class PlayerSpawnPatch
     {
