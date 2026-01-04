@@ -27,12 +27,12 @@ jobs:
     - name: Stage AssetBundles
       run: Copy-Item -Path "AssetBundles\*" -Destination "bin\Release\net4.8\" -Recurse -Force
 
-    # 5. Deploy to FTP Server
-    - name: FTP Deploy
-      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+    # 5. Deploy via SCP
+    - name: SCP Deploy
+      uses: nickel59/scp-upload-action@v1
       with:
-        server: ${{ secrets.FTP_SERVER }}
-        username: ${{ secrets.FTP_USERNAME }}
+        host: ${{ secrets.FTP_SERVER }}
+        user: ${{ secrets.FTP_USERNAME }}
         password: ${{ secrets.FTP_PASSWORD }}
-        local-dir: ./bin/Release/net4.8/
-        server-dir: /home/user/pubsrv_testing_1/Plugins/CTP/
+        local: ./bin/Release/net4.8/* # Note the wildcard to grab contents
+        remote: /home/user/pubsrv_testing_1/Plugins/CTP/
