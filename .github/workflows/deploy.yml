@@ -57,5 +57,5 @@ jobs:
           passphrase: ${{ secrets.SSH_KEY_PASSWORD }}
           fingerprint: ${{ secrets.SSH_TARGET_FINGERPRINT }}
           # We map the local artifact folder to the remote server folder
-          source: build-files/*
-          target: /home/user/pubsrv_testing_1/Plugins/CTP/
+          source: CTP
+          target: /home/user/pubsrv_testing_1/Plugins/
