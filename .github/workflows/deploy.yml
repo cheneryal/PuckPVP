@@ -1,0 +1,40 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Checkout Code
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 2. Setup .NET
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 4.8.x
+
+    # 3. Build the Mod
+    - name: Build Solution
+      run: dotnet build --configuration Release
+
+    # 4. Copy Asset Bundles
+    - name: Stage AssetBundles
+      # -r ensures it copies everything even if you have subfolders
+      # Uses 'AssetBundles' to match your root folder name
+      run: cp -r AssetBundles/* bin/Release/net4.8/
+
+    # 5. Deploy to FTP Server
+    - name: FTP Deploy
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+      with:
+        server: ${{ secrets.FTP_SERVER }}
+        username: ${{ secrets.FTP_USERNAME }}
+        password: ${{ secrets.FTP_PASSWORD }}
+        local-dir: ./bin/Release/net4.8/
+        server-dir: /home/user/pubsrv_testing_1/Plugins/CTP/
