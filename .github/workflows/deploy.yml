@@ -5,34 +5,55 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-deploy:
-    runs-on: windows-latest  # CHANGED: Must use Windows for .NET 4.8
-
+  # JOB 1: BUILD (Must run on Windows for .NET 4.8)
+  build:
+    runs-on: windows-latest
     steps:
-    # 1. Checkout Code
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    # 2. Setup .NET (Use a modern SDK to build the legacy target)
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: 6.0.x # CHANGED: Uses modern SDK to build your 4.8 project
+      # Setup modern .NET SDK to run the build tools
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 6.0.x
 
-    # 3. Build the Mod
-    - name: Build Solution
-      run: dotnet build --configuration Release
+      # Build the legacy 4.8 project
+      - name: Build Solution
+        run: dotnet build --configuration Release
 
-    # 4. Copy Asset Bundles (PowerShell syntax)
-    - name: Stage AssetBundles
-      run: Copy-Item -Path "AssetBundles\*" -Destination "bin\Release\net4.8\" -Recurse -Force
+      # Organize files into a specific folder for upload
+      - name: Stage AssetBundles
+        run: |
+          New-Item -ItemType Directory -Force -Path "Output"
+          Copy-Item -Path "AssetBundles\*" -Destination "bin\Release\net4.8\" -Recurse -Force
+          Copy-Item -Path "bin\Release\net4.8\*" -Destination "Output\" -Recurse -Force
 
-    # 5. Deploy via SCP
-    - name: SCP Deploy
-      uses: nickel59/scp-upload-action@v1
-      with:
-        host: ${{ secrets.FTP_SERVER }}
-        user: ${{ secrets.FTP_USERNAME }}
-        password: ${{ secrets.FTP_PASSWORD }}
-        local: ./bin/Release/net4.8/* # Note the wildcard to grab contents
-        remote: /home/user/pubsrv_testing_1/Plugins/CTP/
+      # Upload the build results so Job 2 can see them
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModBuildFiles
+          path: Output/
+
+  # JOB 2: DEPLOY (Runs on Linux to support SCP Action)
+  deploy:
+    needs: build  # Waits for build to finish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ModBuildFiles
+          path: build-files  # Downloads to this folder on the Linux runner
+
+      - name: Upload file via SSH
+        uses: nicklasfrahm/scp-action@main
+        with:
+          direction: upload
+          host: ${{ secrets.SSH_TARGET_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # We map the local artifact folder to the remote server folder
+          source: build-files/*
+          target: /home/user/pubsrv_testing_1/Plugins/CTP/
