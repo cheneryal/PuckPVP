@@ -36,26 +36,24 @@ jobs:
           name: ModBuildFiles
           path: Output/
 
-  # JOB 2: DEPLOY (Runs on Linux to support SCP Action)
+  # JOB 2: DEPLOY (Runs on Linux)
   deploy:
-    needs: build  # Waits for build to finish
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
           name: ModBuildFiles
-          path: build-files  # Downloads to this folder on the Linux runner
+          path: CTP  # Downloads your files into a folder named "CTP"
 
-      - name: Upload file via SSH
-        uses: nicklasfrahm/scp-action@main
+      - name: Upload via SCP
+        uses: appleboy/scp-action@v0.1.7
         with:
-          direction: upload
           host: ${{ secrets.SSH_TARGET_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          passphrase: ${{ secrets.SSH_KEY_PASSWORD }}
           fingerprint: ${{ secrets.SSH_TARGET_FINGERPRINT }}
-          # We map the local artifact folder to the remote server folder
-          source: CTP
-          target: /home/user/pubsrv_testing_1/Plugins/
+          # We upload the whole "CTP" folder to the "Plugins" folder
+          source: "CTP"
+          target: "/home/user/pubsrv_testing_1/Plugins/"
