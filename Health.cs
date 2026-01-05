@@ -15,24 +15,45 @@ public class CTP_PlayerHealth : MonoBehaviour
     
     private Vector3 lastDeathPos;
     private Quaternion lastDeathRot;
+    private float lastSyncedHP;
+
+    // --- UNDERWATER VISUALS ---
+    private bool isUnderwater = false;
+    private bool defaultsCaptured = false;
+    private Color originalFogColor;
+    private float originalFogDensity;
+    private FogMode originalFogMode;
+    private bool originalFogEnabled;
 
     void Awake()
     {
         player = GetComponent<Player>();
         CurrentHP = MaxHP;
+        lastSyncedHP = MaxHP;
+    }
+
+    void Start()
+    {
+        // Capture initial weather settings to restore them later
+        if (player.IsOwner)
+        {
+            CaptureDefaultVisuals();
+        }
     }
 
     void Update()
     {
-        // Auto-Reset if body spawns (Revive detection)
         if (IsDead && player.PlayerBody != null)
         {
             IsDead = false;
             CurrentHP = MaxHP;
+            lastSyncedHP = MaxHP;
             if (NetworkManager.Singleton.IsServer) player.Server_DespawnSpectatorCamera();
+            
+            // Restore visuals on respawn
+            if (player.IsOwner) SetUnderwaterVisuals(false);
         }
 
-        // UI Management
         if (IsDead)
         {
             if (canvasRoot != null) Destroy(canvasRoot);
@@ -41,6 +62,16 @@ public class CTP_PlayerHealth : MonoBehaviour
 
         if (player.PlayerBody != null)
         {
+            // Physics Logic (Server + Client Prediction)
+            CheckWaterPhysics();
+
+            // Visual Logic (Local Owner Only)
+            if (player.IsOwner)
+            {
+                CheckWaterVisuals();
+            }
+
+            // UI Logic
             if (canvasRoot == null) CreateHealthBar(player.PlayerBody.transform);
             
             if (canvasRoot != null)
@@ -64,6 +95,88 @@ public class CTP_PlayerHealth : MonoBehaviour
         }
     }
 
+    private void CheckWaterPhysics()
+    {
+        // Water level check (approx -1.5f)
+        if (player.PlayerBody.transform.position.y < -1.5f)
+        {
+            var rb = player.PlayerBody.GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                Vector3 v = rb.linearVelocity;
+
+                // 1. Horizontal Drag (Viscosity)
+                v.x = Mathf.Lerp(v.x, 0f, Time.deltaTime * 5f);
+                v.z = Mathf.Lerp(v.z, 0f, Time.deltaTime * 5f);
+
+                // 2. Vertical Buoyancy/Drag
+                // Clamp falling speed to -1.5m/s to simulate sinking
+                if (v.y < -1.5f)
+                {
+                    v.y = Mathf.Lerp(v.y, -1.5f, Time.deltaTime * 15f);
+                }
+
+                rb.linearVelocity = v;
+            }
+
+            if (NetworkManager.Singleton.IsServer)
+            {
+                TakeDamage(40f * Time.deltaTime);
+            }
+        }
+    }
+
+    private void CheckWaterVisuals()
+    {
+        Transform cam = GetCamera();
+        if (cam == null) return;
+
+        // Check if Camera (eyes) is underwater, not just the feet
+        bool camBelowWater = cam.position.y < -1.6f;
+
+        if (camBelowWater && !isUnderwater)
+        {
+            SetUnderwaterVisuals(true);
+        }
+        else if (!camBelowWater && isUnderwater)
+        {
+            SetUnderwaterVisuals(false);
+        }
+    }
+
+    private void SetUnderwaterVisuals(bool active)
+    {
+        if (!defaultsCaptured) CaptureDefaultVisuals();
+
+        isUnderwater = active;
+
+        if (active)
+        {
+            // Set thick blue fog
+            RenderSettings.fog = true;
+            RenderSettings.fogMode = FogMode.Exponential;
+            RenderSettings.fogDensity = 0.15f; // Thick fog
+            RenderSettings.fogColor = new Color(0.0f, 0.1f, 0.25f, 1.0f); // Deep Blue
+        }
+        else
+        {
+            // Restore original settings
+            RenderSettings.fog = originalFogEnabled;
+            RenderSettings.fogMode = originalFogMode;
+            RenderSettings.fogDensity = originalFogDensity;
+            RenderSettings.fogColor = originalFogColor;
+        }
+    }
+
+    private void CaptureDefaultVisuals()
+    {
+        originalFogEnabled = RenderSettings.fog;
+        originalFogMode = RenderSettings.fogMode;
+        originalFogDensity = RenderSettings.fogDensity;
+        originalFogColor = RenderSettings.fogColor;
+        defaultsCaptured = true;
+    }
+
     private Transform GetCamera()
     {
         if (Camera.main != null) return Camera.main.transform;
@@ -71,21 +184,21 @@ public class CTP_PlayerHealth : MonoBehaviour
         return null;
     }
 
-    // Called by Server Logic
     public void TakeDamage(float amount)
     {
-        // Server Authority Logic
         CurrentHP -= amount;
 
-        // SYNC: Send hidden chat message to all clients
         if (NetworkManager.Singleton.IsServer)
         {
-            // Format: $$HP|ClientID|NewHP
-            string msg = $"$$HP|{player.OwnerClientId}|{CurrentHP}";
-            var uiChat = NetworkBehaviourSingleton<UIChat>.Instance;
-            if (uiChat != null)
+            if (Mathf.Abs(CurrentHP - lastSyncedHP) > 5f || CurrentHP <= 0f)
             {
-                uiChat.Server_SendSystemChatMessage(msg);
+                string msg = $"$$HP|{player.OwnerClientId}|{CurrentHP}";
+                var uiChat = NetworkBehaviourSingleton<UIChat>.Instance;
+                if (uiChat != null)
+                {
+                    uiChat.Server_SendSystemChatMessage(msg);
+                }
+                lastSyncedHP = CurrentHP;
             }
         }
 
@@ -95,13 +208,11 @@ public class CTP_PlayerHealth : MonoBehaviour
         }
     }
 
-    // Called by Client Chat Interceptor
     public void SetHPClientSide(float hp)
     {
         CurrentHP = hp;
         if (CurrentHP <= 0 && !IsDead)
         {
-            // Local visual death
             IsDead = true;
             if (canvasRoot != null) Destroy(canvasRoot);
         }
@@ -112,6 +223,9 @@ public class CTP_PlayerHealth : MonoBehaviour
         IsDead = true;
         CurrentHP = 0;
         
+        // Reset effects if I died locally
+        if (player.IsOwner) SetUnderwaterVisuals(false);
+
         if (canvasRoot != null) Destroy(canvasRoot);
 
         if (NetworkManager.Singleton.IsServer)
@@ -120,7 +234,6 @@ public class CTP_PlayerHealth : MonoBehaviour
         }
         else if (player.IsOwner)
         {
-            // Signal Server
             player.Client_SetPlayerStateRpc(PlayerState.Spectate, 0f);
         }
     }

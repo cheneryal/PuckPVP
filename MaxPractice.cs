@@ -60,7 +60,6 @@ public class CaptureThePuck_Mod : IPuckMod
 
 public static class HP_Mechanic_Patches
 {
-    // 1. Attach Health Manager to PLAYER
     [HarmonyPatch(typeof(Player), "OnNetworkSpawn")]
     public static class PlayerSpawnPatch
     {
@@ -74,60 +73,42 @@ public static class HP_Mechanic_Patches
         }
     }
 
-    // 2. Detect Impact via Deferred Collision
-    // This replaces the old OnCollisionEnter patch. 
-    // It hooks into the exact same method that triggers the audio.
     [HarmonyPatch(typeof(PlayerBodyV2), "Server_OnDeferredCollision")]
     public static class DeferredCollisionPatch
     {
         [HarmonyPostfix]
         public static void Postfix(PlayerBodyV2 __instance, GameObject gameObject, float force)
         {
-            // Ensure we are on Server (Damage Authority)
             if (!NetworkManager.Singleton.IsServer) return;
-
-            // Filter out invalid objects
             if (gameObject == null) return;
 
             float damageMultiplier = 0f;
             float damageCap = 100f;
 
-            // Use GetComponentInParent to find root objects (Stick, Puck, Player)
-            // The 'gameObject' passed here is usually the specific collider object
             Puck puck = gameObject.GetComponentInParent<Puck>();
             Stick stick = gameObject.GetComponentInParent<Stick>();
             PlayerBodyV2 otherPlayer = gameObject.GetComponentInParent<PlayerBodyV2>();
 
-            // --- DAMAGE TUNING ---
-            // 'force' is the calculated impact intensity used for audio volume.
-            // It generally ranges from 0.0 to 10.0+ depending on impact.
-            
             if (puck != null)
             {
-                // Puck: Fast, sharp hits.
                 damageMultiplier = 3.0f; 
-                damageCap = 34f; // Max 3 hard shots to kill
+                damageCap = 34f; 
             }
             else if (stick != null)
             {
-                // Stick: Slashing.
-                damageMultiplier = 5.0f; // High multiplier because sticks are light
+                damageMultiplier = 5.0f; 
                 damageCap = 25f; 
             }
             else if (otherPlayer != null)
             {
-                // Body Check: Heavy mass hits.
                 damageMultiplier = 4.0f; 
                 damageCap = 40f; 
             }
             else
             {
-                // Hit wall/floor/net - Ignore for HP
                 return; 
             }
             
-            // Apply Damage
-            // The game already filters tiny collisions before calling this method.
             if (force > 0.1f) 
             {
                 float finalDamage = force * damageMultiplier;
@@ -138,7 +119,6 @@ public static class HP_Mechanic_Patches
                     var hp = __instance.Player.GetComponent<CTP_PlayerHealth>();
                     if (hp != null)
                     {
-                        // Debug.Log($"[CTP] Hit by {gameObject.name}. Force: {force:F1}. Dmg: {finalDamage:F1}");
                         hp.TakeDamage(finalDamage);
                     }
                 }
@@ -146,7 +126,6 @@ public static class HP_Mechanic_Patches
         }
     }
 
-    // 3. Intercept Client RPC Death Signal (For Local/Owner Death)
     [HarmonyPatch(typeof(Player), "Client_SetPlayerStateRpc")]
     public static class RpcInterception
     {
@@ -158,20 +137,18 @@ public static class HP_Mechanic_Patches
                 var hp = __instance.GetComponent<CTP_PlayerHealth>();
                 if (hp != null && !hp.IsDead)
                 {
-                    hp.TakeDamage(9999f); // Trigger full death flow
+                    hp.TakeDamage(9999f); 
                 }
             }
         }
     }
 
-    // 4. SYNC: Intercept Chat Messages to Update HP for everyone
     [HarmonyPatch(typeof(UIChat), "AddChatMessage")]
     public static class ChatSyncPatch
     {
         [HarmonyPrefix]
         public static bool Prefix(string message)
         {
-            // Protocol Format: "$$HP|ClientId|CurrentHP"
             if (message.StartsWith("$$HP|"))
             {
                 try
@@ -198,22 +175,39 @@ public static class HP_Mechanic_Patches
                     }
                 }
                 catch (System.Exception ex) { Debug.LogError($"[CTP] Sync Error: {ex}"); }
-
-                // Hide this message from chat
                 return false; 
             }
             return true;
         }
     }
-}
 
-// --- HARMONY PATCHES ---
+    [HarmonyPatch(typeof(Puck), "FixedUpdate")]
+    public static class PuckHazardPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(Puck __instance)
+        {
+            if (NetworkManager.Singleton.IsServer)
+            {
+                if (__instance.transform.position.y < -5.0f)
+                {
+                    var rb = __instance.GetComponent<Rigidbody>();
+                    if (rb != null)
+                    {
+                        rb.position = new Vector3(0, 1.5f, 0);
+                        // Updated for Unity 6+: velocity -> linearVelocity
+                        rb.linearVelocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                    }
+                }
+            }
+        }
+    }
+}
 
 [HarmonyPatch(typeof(SynchronizedObjectManager))]
 public static class NetworkBoundsPatches
 {
-    // Precision: 200f (5mm). Max Radius: ~163m. Map Size: 300m.
-    // This is the highest precision possible without overflow.
     const float VANILLA_PRECISION = 655f;
     const float MODDED_PRECISION = 200f; 
 
@@ -257,55 +251,40 @@ public static class SmoothingPatches
 
             if (isStick || isPuck)
             {
-                // OPTIMIZATION FIX:
-                // Grid is 5mm (1/200). Threshold MUST be > 5mm to prevent quantization noise loops.
-                // Set to 6mm (0.006f). This stops "micro-jitter packets".
                 field.SetValue(__instance, 0.006f); 
             }
             else
             {
-                // Bodies are larger/slower, increase to 3cm to save bandwidth.
                 field.SetValue(__instance, 0.03f); 
             }
         }
     }
 
-    // THE BUTTER PATCH (Client Side Smoothing)
-    // This runs on the receiving client, so it doesn't affect server bandwidth.
     [HarmonyPatch("OnClientTick")]
     [HarmonyPrefix]
     static bool OnClientTickPrefix(SynchronizedObject __instance, Vector3 position, Quaternion rotation, float serverDeltaTime)
     {
         if (serverDeltaTime <= 0f) return false;
 
-        // 1. Calculate raw network velocity
         Vector3 rawLinearVel = (position - __instance.transform.position) / serverDeltaTime;
         Vector3 rawAngularVel = (rotation * Quaternion.Inverse(__instance.transform.rotation)).eulerAngles / serverDeltaTime;
 
-        // 2. Fix Euler wrap-around
         if (rawAngularVel.x > 180) rawAngularVel.x -= 360; else if (rawAngularVel.x < -180) rawAngularVel.x += 360;
         if (rawAngularVel.y > 180) rawAngularVel.y -= 360; else if (rawAngularVel.y < -180) rawAngularVel.y += 360;
         if (rawAngularVel.z > 180) rawAngularVel.z -= 360; else if (rawAngularVel.z < -180) rawAngularVel.z += 360;
 
-        // 3. Adaptive Smoothing Factors
         float speed = rawLinearVel.magnitude;
-        // Aggressive smoothing at low speeds (0.1) to hide the 5mm grid steps
-        // Fast reaction at high speeds (0.8) for shots
         float smoothFactor = Mathf.Lerp(0.1f, 0.8f, Mathf.Clamp01(speed / 4.0f));
 
-        // 4. Apply Smoothing to Predicted Velocities
         __instance.PredictedLinearVelocity = Vector3.Lerp(__instance.PredictedLinearVelocity, rawLinearVel, smoothFactor);
         __instance.PredictedAngularVelocity = Vector3.Lerp(__instance.PredictedAngularVelocity, rawAngularVel, smoothFactor);
 
-        // 5. Store last received via reflection
         var type = typeof(SynchronizedObject);
         type.GetField("lastReceivedPosition", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(__instance, position);
         type.GetField("lastReceivedRotation", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(__instance, rotation);
 
-        // 6. SOFT SYNC
         float distError = Vector3.Distance(__instance.transform.position, position);
         
-        // If error > 10cm (teleport/lag spike), snap instantly
         if (distError > 0.1f) 
         {
             __instance.transform.position = position;
@@ -313,7 +292,6 @@ public static class SmoothingPatches
         }
         else
         {
-            // Smoothly blend to the new 5mm grid position
             __instance.transform.position = Vector3.Lerp(__instance.transform.position, position, 0.5f);
             __instance.transform.rotation = Quaternion.Slerp(__instance.transform.rotation, rotation, 0.5f);
         }
@@ -321,9 +299,6 @@ public static class SmoothingPatches
         return false;
     }
 }
-
-
-// -----------------------
 
 public class CTPEnforcer : MonoBehaviour
 {
