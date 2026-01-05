@@ -74,7 +74,7 @@ public static class HP_Mechanic_Patches
         }
     }
 
-    // 2. Detect Impact via Deferred Collision (Matches Grunt Sound Logic)
+    // 2. Detect Impact via Deferred Collision
     // This replaces the old OnCollisionEnter patch. 
     // It hooks into the exact same method that triggers the audio.
     [HarmonyPatch(typeof(PlayerBodyV2), "Server_OnDeferredCollision")]
