@@ -101,6 +101,17 @@ public static class HP_Mechanic_Patches
             }
             else if (otherPlayer != null)
             {
+                var rb_instance = __instance.GetComponent<Rigidbody>();
+                var rb_other = otherPlayer.GetComponent<Rigidbody>();
+
+                if (rb_instance != null && rb_other != null)
+                {
+                    if (rb_instance.linearVelocity.magnitude >= rb_other.linearVelocity.magnitude)
+                    {
+                        return;
+                    }
+                }
+                
                 damageMultiplier = 4.0f; 
                 damageCap = 40f; 
             }
