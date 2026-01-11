@@ -4,7 +4,7 @@ using HarmonyLib;
 using UnityEngine;
 using Unity.Netcode;
 
-namespace IceScratchMod
+namespace CTP
 {
     [HarmonyPatch(typeof(UIChat), "Client_SendClientChatMessage")]
     public static class ChatCommands
@@ -73,14 +73,21 @@ namespace IceScratchMod
 
         private static void TriggerRevive()
         {
-            var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
-            foreach (var p in allPlayers)
+            if (NetworkManager.Singleton.IsServer)
             {
-                if (p.IsOwner)
+                var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
+                foreach (var p in allPlayers)
                 {
-                    p.Client_SetPlayerStateRpc(PlayerState.Play, 0f);
-                    return;
+                    if (p.IsOwner)
+                    {
+                        CTP_KnockdownManager.RevivePlayer(p.OwnerClientId);
+                        return;
+                    }
                 }
+            }
+            else
+            {
+                SendResponse(null, "Revive command can only be run by the host.");
             }
         }
 

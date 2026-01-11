@@ -2,35 +2,38 @@ using UnityEngine;
 using Unity.Netcode;
 using System.Collections.Generic;
 
-public class CTP_HealthSyncer : NetworkBehaviour
+namespace CTP
 {
-    public static CTP_HealthSyncer Instance { get; private set; }
-
-    void Awake()
+    public class CTP_HealthSyncer : NetworkBehaviour
     {
-        if (Instance != null && Instance != this)
-        {
-            Destroy(gameObject);
-        }
-        else
-        {
-            Instance = this;
-        }
-    }
+        public static CTP_HealthSyncer Instance { get; private set; }
 
-    [ClientRpc]
-    public void UpdateHealth_ClientRpc(ulong clientId, float newHP)
-    {
-        var playerManager = NetworkBehaviourSingleton<PlayerManager>.Instance;
-        if (playerManager != null)
+        void Awake()
         {
-            var player = playerManager.GetPlayerByClientId(clientId);
-            if (player != null)
+            if (Instance != null && Instance != this)
             {
-                var hp = player.GetComponent<CTP_PlayerHealth>();
-                if (hp != null)
+                Destroy(gameObject);
+            }
+            else
+            {
+                Instance = this;
+            }
+        }
+
+        [ClientRpc]
+        public void UpdateHealth_ClientRpc(ulong clientId, float newHP)
+        {
+            var playerManager = NetworkBehaviourSingleton<PlayerManager>.Instance;
+            if (playerManager != null)
+            {
+                var player = playerManager.GetPlayerByClientId(clientId);
+                if (player != null)
                 {
-                    hp.SetHPClientSide(newHP);
+                    var hp = player.GetComponent<CTP_PlayerHealth>();
+                    if (hp != null)
+                    {
+                        hp.SetHPClientSide(newHP);
+                    }
                 }
             }
         }
