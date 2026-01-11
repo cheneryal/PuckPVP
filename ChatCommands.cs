@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using HarmonyLib;
 using UnityEngine;
 using Unity.Netcode;
@@ -12,11 +13,20 @@ namespace IceScratchMod
         public static bool Prefix(string message, UIChat __instance)
         {
             if (string.IsNullOrEmpty(message)) return true;
-            string cleanedMessage = message.TrimStart();
+            string cleanedMessage = message.Trim();
             
             if (cleanedMessage.StartsWith("/damage", StringComparison.OrdinalIgnoreCase))
             {
-                ApplyDamage(__instance, 25f);
+                float damageAmount = 25f;
+                string[] parts = cleanedMessage.Split(' ');
+                if (parts.Length > 1)
+                {
+                    if (float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedDamage))
+                    {
+                        damageAmount = parsedDamage;
+                    }
+                }
+                ApplyDamage(__instance, damageAmount);
                 return false;
             }
             if (cleanedMessage.StartsWith("/kill", StringComparison.OrdinalIgnoreCase))
@@ -29,7 +39,36 @@ namespace IceScratchMod
                 TriggerRevive();
                 return false;
             }
+
+            // --- New Command: /sethp ---
+            if (cleanedMessage.StartsWith("/sethp", StringComparison.OrdinalIgnoreCase))
+            {
+                string[] parts = cleanedMessage.Split(' ');
+                if (parts.Length > 1 && float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float newHP))
+                {
+                    SetHealth(__instance, newHP);
+                }
+                else
+                {
+                    SendResponse(__instance, "Usage: /sethp <value>");
+                }
+                return false;
+            }
             return true;
+        }
+
+        private static void SetHealth(UIChat chat, float newHP)
+        {
+             var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
+            foreach (var p in allPlayers)
+            {
+                if (p.IsOwner)
+                {
+                    var hp = p.GetComponent<CTP_PlayerHealth>();
+                    if(hp) hp.SetHPClientSide(newHP);
+                    return;
+                }
+            }
         }
 
         private static void TriggerRevive()

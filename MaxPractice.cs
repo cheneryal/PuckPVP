@@ -11,6 +11,7 @@ using UnityEngine.SceneManagement;
 using UScene = UnityEngine.SceneManagement.SceneManager;
 using Unity.Netcode;
 using System.Globalization;
+using UnityEngine.UIElements;
 
 [Serializable]
 public class CTPConfig
@@ -148,47 +149,64 @@ public static class HP_Mechanic_Patches
                 var hp = __instance.GetComponent<CTP_PlayerHealth>();
                 if (hp != null && !hp.IsDead)
                 {
-                    hp.TakeDamage(9999f); 
+                    // hp.TakeDamage(9999f); 
                 }
             }
         }
     }
 
-    [HarmonyPatch(typeof(UIChat), "AddChatMessage")]
-    public static class ChatSyncPatch
-    {
-        [HarmonyPrefix]
-        public static bool Prefix(string message)
-        {
-            if (message.StartsWith("$$HP|"))
-            {
-                try
-                {
-                    string[] parts = message.Split('|');
-                    if (parts.Length == 3)
-                    {
-                        ulong clientId = ulong.Parse(parts[1]);
-                        float newHP = float.Parse(parts[2], CultureInfo.InvariantCulture);
+    
 
-                        var playerManager = NetworkBehaviourSingleton<PlayerManager>.Instance;
-                        if (playerManager != null)
-                        {
-                            var player = playerManager.GetPlayerByClientId(clientId);
-                            if (player != null)
-                            {
-                                var hp = player.GetComponent<CTP_PlayerHealth>();
-                                if (hp != null)
-                                {
-                                    hp.SetHPClientSide(newHP);
-                                }
-                            }
-                        }
-                    }
+    [HarmonyPatch]
+    public static class Patch_UIHUDController_Start
+    {
+        static MethodBase TargetMethod()
+        {
+            var type = AccessTools.TypeByName("UIHUDController");
+            if (type == null) return null;
+            return AccessTools.Method(type, "Start");
+        }
+
+        [HarmonyPostfix]
+        static void Postfix()
+        {
+            MonoBehaviourSingleton<EventManager>.Instance.AddEventListener("Event_OnPlayerHPChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
+        }
+    }
+    
+    [HarmonyPatch]
+    public static class Patch_UIHUDController_OnDestroy
+    {
+        static MethodBase TargetMethod()
+        {
+            var type = AccessTools.TypeByName("UIHUDController");
+            if (type == null) return null;
+            return AccessTools.Method(type, "OnDestroy");
+        }
+        
+        [HarmonyPostfix]
+        static void Postfix()
+        {
+            MonoBehaviourSingleton<EventManager>.Instance.RemoveEventListener("Event_OnPlayerHPChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
+        }
+    }
+    
+    public static class UIHUDController_HealthPatch
+    {
+        public static void Event_OnPlayerHPChanged(Dictionary<string, object> message)
+        {
+            try
+            {
+                if (message["player"] is Player player && player.IsLocalPlayer)
+                {
+                    var newHP = (float)message["newHP"];
+                    UIGameState_Helper.UpdateHp(newHP);
                 }
-                catch (System.Exception ex) { Debug.LogError($"[CTP] Sync Error: {ex}"); }
-                return false; 
             }
-            return true;
+            catch (Exception e)
+            {
+                Debug.LogError($"[CTP] Error in Event_OnPlayerHPChanged: {e}");
+            }
         }
     }
 
@@ -318,6 +336,7 @@ public class CTPEnforcer : MonoBehaviour
     GameObject spawnedMapInstance;
     PhysicsMaterial customBoardMaterial;
     PhysicsMaterial customIceMaterial;
+    private static bool uiHealthBarInitialized = false;
 
     const int LAYER_ICE = 13;    
     const int LAYER_BOARDS = 12; 
@@ -338,13 +357,26 @@ public class CTPEnforcer : MonoBehaviour
     void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
         if (!cfg.ModEnabled) return;
+
+        if (!uiHealthBarInitialized)
+        {
+            GameObject uiHealthBarGo = new GameObject("UIHealthBarController");
+            uiHealthBarGo.AddComponent<UIHealthBarController>();
+            DontDestroyOnLoad(uiHealthBarGo);
+
+            GameObject healthSyncerGo = new GameObject("CTP_HealthSyncer");
+            healthSyncerGo.AddComponent<CTP_HealthSyncer>();
+            DontDestroyOnLoad(healthSyncerGo);
+
+            uiHealthBarInitialized = true;
+        }
+
         StartCoroutine(ProcessMapRoutine());
     }
 
     IEnumerator ProcessMapRoutine()
     {
         yield return new WaitForSeconds(1.0f);
-        CreatePhysicsMaterials();
 
         if (spawnedMapInstance == null) yield return StartCoroutine(LoadAndInstantiateMap());
 
@@ -353,10 +385,13 @@ public class CTPEnforcer : MonoBehaviour
             Log($"Configuring Map: {spawnedMapInstance.name}...");
             try 
             {
+                CreatePhysicsMaterials();
                 HandleSceneCleanup();
                 ConfigureCustomMapPhysics(spawnedMapInstance);
                 HandleGoals();
                 OverrideVanillaBounds();
+                HandleAudioEnvironment();
+                HandleSkybox();
             }
             catch (Exception ex) { Debug.LogError($"[CTP] Error: {ex.Message}"); }
         }
@@ -389,12 +424,69 @@ public class CTPEnforcer : MonoBehaviour
 
     void CreatePhysicsMaterials()
     {
-        customBoardMaterial = new PhysicsMaterial("CTP_Barrier");
-        customBoardMaterial.bounciness = 0.2f;
-        customBoardMaterial.bounceCombine = PhysicsMaterialCombine.Minimum;
+        var barrier = GameObject.Find("Barrier - Left") ?? GameObject.Find("Barrier - Right") ?? GameObject.Find("Barrier");
+        if (barrier != null)
+        {
+            var vanillaMat = barrier.GetComponent<Collider>()?.sharedMaterial;
+            if (vanillaMat != null)
+            {
+                customBoardMaterial = new PhysicsMaterial("CTP_Barrier_From_Vanilla");
+                customBoardMaterial.bounciness = 0.2f; 
+                customBoardMaterial.dynamicFriction = vanillaMat.dynamicFriction;
+                customBoardMaterial.staticFriction = vanillaMat.staticFriction;
+                customBoardMaterial.frictionCombine = vanillaMat.frictionCombine;
+                customBoardMaterial.bounceCombine = vanillaMat.bounceCombine;
+                Log("Successfully duplicated vanilla board physics material and increased bounciness.");
+            }
+        }
+
+        if (customBoardMaterial == null)
+        {
+            Log("Could not find vanilla board material, creating one with estimated values.");
+            customBoardMaterial = new PhysicsMaterial("CTP_Barrier");
+            customBoardMaterial.bounciness = 0.2f;
+            customBoardMaterial.dynamicFriction = 0.0f;
+            customBoardMaterial.staticFriction = 0.0f;
+            customBoardMaterial.bounceCombine = PhysicsMaterialCombine.Average;
+            customBoardMaterial.frictionCombine = PhysicsMaterialCombine.Average;
+        }
+        
         customIceMaterial = new PhysicsMaterial("CTP_Ice");
         customIceMaterial.dynamicFriction = 0f;
         customIceMaterial.staticFriction = 0f;
+    }
+
+    void HandleSkybox()
+    {
+        if (loadedBundle != null)
+        {
+            Material skyboxMaterial = loadedBundle.LoadAsset<Material>("FS002_Night");
+            if (skyboxMaterial != null)
+            {
+                RenderSettings.skybox = skyboxMaterial;
+                Log("Successfully set skybox to FS002_Night.");
+            }
+            else
+            {
+                Log("Could not find skybox material 'FS002_Night' in the asset bundle.");
+            }
+        }
+    }
+
+    void HandleAudioEnvironment()
+    {
+        var reverbZone = Resources.FindObjectsOfTypeAll<AudioReverbZone>().FirstOrDefault(o => o.gameObject.scene.IsValid());
+        if (reverbZone != null)
+        {
+            reverbZone.gameObject.SetActive(true);
+            reverbZone.transform.position = Vector3.zero;
+            reverbZone.maxDistance = 500f;
+            Log($"Adjusted and enlarged reverb zone '{reverbZone.name}' to {reverbZone.maxDistance}m.");
+        }
+        else
+        {
+            Log("Could not find vanilla reverb zone. Stick audio might sound flat.");
+        }
     }
 
     void ConfigureCustomMapPhysics(GameObject root)
@@ -527,4 +619,96 @@ public class CTPEnforcer : MonoBehaviour
     }
 
     void Log(string msg) { if (cfg.LogDebug) Debug.Log($"[CTP] {msg}"); }
+}
+
+public static class UIGameState_Helper
+{
+    public static UnityEngine.UIElements.Label hpLabel;
+    
+    public static void UpdateHp(float currentHP)
+    {
+        if (hpLabel != null)
+        {
+            hpLabel.text = $"HP: {Mathf.RoundToInt(currentHP)}";
+        }
+    }
+}
+
+[HarmonyPatch]
+public static class UIHUD_Patch
+{
+    static MethodBase TargetMethod()
+    {
+        var type = AccessTools.TypeByName("UIHUD");
+        if (type == null)
+        {
+            Debug.LogError("[CTP] UIHUD type not found for patching.");
+            return null;
+        }
+        var method = AccessTools.Method(type, "Initialize");
+        if (method == null)
+        {
+            Debug.LogError("[CTP] UIHUD.Initialize method not found for patching.");
+        }
+        return method;
+    }
+
+    [HarmonyPostfix]
+    public static void Postfix(object __instance, VisualElement rootVisualElement)
+    {
+        Debug.Log("[CTP] UIHUD_Patch.Postfix triggered.");
+        try
+        {
+            var container = rootVisualElement.Q<VisualElement>("PlayerContainer");
+            if (container == null)
+            {
+                Debug.LogError("[CTP] PlayerContainer not found!");
+                return;
+            }
+            Debug.Log("[CTP] PlayerContainer found.");
+
+            var existingLabel = container.Q<UnityEngine.UIElements.Label>("PlayerHPLabel");
+            if (existingLabel != null)
+            {
+                 UIGameState_Helper.hpLabel = existingLabel;
+                 Debug.Log("[CTP] HP Label already exists.");
+                 return;
+            }
+
+            var hpLabel = new UnityEngine.UIElements.Label
+            {
+                name = "PlayerHPLabel",
+                text = "HP: 100"
+            };
+
+            var speedLabel = container.Q<UnityEngine.UIElements.Label>("SpeedLabel");
+            if (speedLabel != null)
+            {
+                Debug.Log("[CTP] SpeedLabel found, copying styles.");
+                hpLabel.style.color = speedLabel.style.color;
+                hpLabel.style.fontSize = speedLabel.style.fontSize;
+                hpLabel.style.unityFontStyleAndWeight = speedLabel.style.unityFontStyleAndWeight;
+                hpLabel.style.unityTextAlign = speedLabel.style.unityTextAlign;
+                hpLabel.style.marginLeft = speedLabel.style.marginLeft;
+                hpLabel.style.marginRight = speedLabel.style.marginRight;
+                hpLabel.style.marginTop = speedLabel.style.marginTop;
+                hpLabel.style.marginBottom = speedLabel.style.marginBottom;
+            }
+            else
+            {
+                Debug.LogWarning("[CTP] SpeedLabel not found. Applying default styles to HP Label.");
+                 hpLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
+                 hpLabel.style.fontSize = 22;
+                 hpLabel.style.unityTextAlign = TextAnchor.MiddleLeft;
+            }
+
+            container.Add(hpLabel);
+            UIGameState_Helper.hpLabel = hpLabel;
+            Debug.Log("[CTP] HP Label added to PlayerContainer.");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[CTP] Error in UIHUD_Patch: {ex}");
+        }
+    }
 }

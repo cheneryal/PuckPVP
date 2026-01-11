@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using Unity.Netcode;
@@ -192,11 +193,9 @@ public class CTP_PlayerHealth : MonoBehaviour
         {
             if (Mathf.Abs(CurrentHP - lastSyncedHP) > 5f || CurrentHP <= 0f)
             {
-                string msg = $"$$HP|{player.OwnerClientId}|{CurrentHP}";
-                var uiChat = NetworkBehaviourSingleton<UIChat>.Instance;
-                if (uiChat != null)
+                if(CTP_HealthSyncer.Instance != null)
                 {
-                    uiChat.Server_SendSystemChatMessage(msg);
+                    CTP_HealthSyncer.Instance.UpdateHealth_ClientRpc(player.OwnerClientId, CurrentHP);
                 }
                 lastSyncedHP = CurrentHP;
             }
@@ -211,6 +210,15 @@ public class CTP_PlayerHealth : MonoBehaviour
     public void SetHPClientSide(float hp)
     {
         CurrentHP = hp;
+
+        var message = new Dictionary<string, object>
+        {
+            { "clientId", player.OwnerClientId },
+            { "newHP", CurrentHP },
+            { "maxHP", MaxHP }
+        };
+        MonoBehaviourSingleton<EventManager>.Instance.TriggerEvent("Event_Client_OnHealthChanged", message);
+
         if (CurrentHP <= 0 && !IsDead)
         {
             IsDead = true;
