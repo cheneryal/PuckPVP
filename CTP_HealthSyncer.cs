@@ -1,6 +1,5 @@
 using UnityEngine;
 using Unity.Netcode;
-using System.Collections.Generic;
 
 namespace CTP
 {
@@ -17,12 +16,15 @@ namespace CTP
             else
             {
                 Instance = this;
+                DontDestroyOnLoad(gameObject);
             }
         }
 
         [ClientRpc]
         public void UpdateHealth_ClientRpc(ulong clientId, float newHP)
         {
+            // This runs on the Client (and Host).
+            // Find the player object associated with the clientId
             var playerManager = NetworkBehaviourSingleton<PlayerManager>.Instance;
             if (playerManager != null)
             {
@@ -32,6 +34,7 @@ namespace CTP
                     var hp = player.GetComponent<CTP_PlayerHealth>();
                     if (hp != null)
                     {
+                        // Update the local data and fire the HUD event
                         hp.SetHPClientSide(newHP);
                     }
                 }

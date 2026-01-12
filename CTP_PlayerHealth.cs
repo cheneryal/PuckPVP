@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using Unity.Netcode;
+using Unity.Collections;
 
 namespace CTP
 {
-    public class CTP_PlayerHealth : NetworkBehaviour
+    public class CTP_PlayerHealth : MonoBehaviour
     {
         public float MaxHP = 100f;
         public float CurrentHP;
@@ -16,26 +17,32 @@ namespace CTP
         private Player player;
         private GameObject canvasRoot;
         private Image fillImage;
-        private float lastSyncedHP;
 
-        // --- UNDERWATER VISUALS ---
         private bool isUnderwater = false;
         private bool defaultsCaptured = false;
-        private Color originalFogColor;
-        private float originalFogDensity;
-        private FogMode originalFogMode;
         private bool originalFogEnabled;
+        private FogMode originalFogMode;
+        private float originalFogDensity;
+        private Color originalFogColor;
+
+        private static bool isNetworkHandlerRegistered = false;
+        private const string SYNC_MSG_NAME = "CTP_HealthSync";
 
         void Awake()
         {
             player = GetComponent<Player>();
             CurrentHP = MaxHP;
-            lastSyncedHP = MaxHP;
         }
 
         void Start()
         {
-            // Capture initial weather settings to restore them later
+            if (!isNetworkHandlerRegistered && NetworkManager.Singleton != null)
+            {
+                NetworkManager.Singleton.CustomMessagingManager.RegisterNamedMessageHandler(SYNC_MSG_NAME, OnHealthSyncReceived);
+                isNetworkHandlerRegistered = true;
+                Debug.Log("[CTP] Health Sync Message Handler Registered.");
+            }
+
             if (player.IsOwner)
             {
                 CaptureDefaultVisuals();
@@ -50,34 +57,14 @@ namespace CTP
                 return;
             }
 
-            if (player.PlayerBody != null)
+            if (player != null && player.PlayerBody != null)
             {
-                // Physics Logic (Server + Client Prediction)
                 CheckWaterPhysics();
 
-                // Visual Logic (Local Owner Only)
-                if (player.IsOwner)
-                {
-                    CheckWaterVisuals();
-                }
+                if (player.IsOwner) CheckWaterVisuals();
 
-                // UI Logic
                 if (canvasRoot == null) CreateHealthBar(player.PlayerBody.transform);
-                
-                if (canvasRoot != null)
-                {
-                    Transform cam = GetCamera();
-                    if (cam != null)
-                        canvasRoot.transform.LookAt(canvasRoot.transform.position + cam.rotation * Vector3.forward, cam.rotation * Vector3.up);
-
-                    if (fillImage != null)
-                    {
-                        float rawPercent = Mathf.Clamp01(CurrentHP / MaxHP);
-                        float steps = 7.0f;
-                        float discreteFill = Mathf.Ceil(rawPercent * steps) / steps;
-                        fillImage.fillAmount = discreteFill;
-                    }
-                }
+                UpdateHealthBar();
             }
             else
             {
@@ -87,32 +74,170 @@ namespace CTP
 
         private void CheckWaterPhysics()
         {
-            // Water level check (approx -1.5f)
             if (player.PlayerBody.transform.position.y < -1.5f)
             {
                 var rb = player.PlayerBody.GetComponent<Rigidbody>();
                 if (rb != null)
                 {
                     Vector3 v = rb.linearVelocity;
-
-                    // 1. Horizontal Drag (Viscosity)
                     v.x = Mathf.Lerp(v.x, 0f, Time.deltaTime * 5f);
                     v.z = Mathf.Lerp(v.z, 0f, Time.deltaTime * 5f);
-
-                    // 2. Vertical Buoyancy/Drag
-                    // Clamp falling speed to -1.5m/s to simulate sinking
-                    if (v.y < -1.5f)
-                    {
-                        v.y = Mathf.Lerp(v.y, -1.5f, Time.deltaTime * 15f);
-                    }
-
+                    if (v.y < -1.5f) v.y = Mathf.Lerp(v.y, -1.5f, Time.deltaTime * 15f);
                     rb.linearVelocity = v;
                 }
 
-                if (NetworkManager.Singleton.IsServer)
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer)
                 {
                     TakeDamage(40f * Time.deltaTime, true);
                 }
+            }
+        }
+
+        public void TakeDamage(float amount, bool isDrowning = false)
+        {
+            if (IsDead) return;
+
+            CurrentHP -= amount;
+
+            // Sync to clients
+            SyncHealthToClients(CurrentHP);
+
+            if (CurrentHP <= 0)
+            {
+                Die(isDrowning);
+            }
+        }
+
+        public void ResetHealth()
+        {
+            CurrentHP = MaxHP;
+            IsDead = false;
+            
+            if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer)
+            {
+                SyncHealthToClients(MaxHP);
+            }
+        }
+
+        private void SyncHealthToClients(float newHP)
+        {
+            if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+
+            var writer = new FastBufferWriter(16, Allocator.Temp);
+            writer.WriteValueSafe(player.OwnerClientId);
+            writer.WriteValueSafe(newHP);
+
+            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessageToAll(SYNC_MSG_NAME, writer);
+        }
+
+        private static void OnHealthSyncReceived(ulong senderId, FastBufferReader reader)
+        {
+            try
+            {
+                reader.ReadValueSafe(out ulong targetClientId);
+                reader.ReadValueSafe(out float receivedHP);
+
+                if (NetworkBehaviourSingleton<PlayerManager>.Instance == null) return;
+                var targetPlayer = NetworkBehaviourSingleton<PlayerManager>.Instance.GetPlayerByClientId(targetClientId);
+                
+                if (targetPlayer != null)
+                {
+                    var hpComp = targetPlayer.GetComponent<CTP_PlayerHealth>();
+                    if (hpComp != null)
+                    {
+                        hpComp.SetHPClientSide(receivedHP);
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[CTP] Error parsing health sync: {ex}");
+            }
+        }
+
+        public void SetHPClientSide(float hp)
+        {
+            CurrentHP = hp;
+            
+            var message = new Dictionary<string, object>
+            {
+                { "clientId", player.OwnerClientId },
+                { "newHP", CurrentHP },
+                { "maxHP", MaxHP }
+            };
+            MonoBehaviourSingleton<EventManager>.Instance.TriggerEvent("Event_Client_OnHealthChanged", message);
+
+            if (CurrentHP <= 0 && !IsDead)
+            {
+                IsDead = true; 
+                if (canvasRoot != null) Destroy(canvasRoot);
+            }
+            else if (CurrentHP > 0 && IsDead)
+            {
+                IsDead = false;
+            }
+        }
+
+        private void Die(bool isDrowning)
+        {
+            if (IsDead) return;
+            IsDead = true;
+            CurrentHP = 0;
+
+            if (canvasRoot != null) Destroy(canvasRoot);
+            if (player.IsOwner) SetUnderwaterVisuals(false);
+
+            if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer)
+            {
+                string reason = isDrowning ? "drowned" : "was eliminated";
+                string msg = $"<color=red><b>{player.Username.Value} {reason}!</b> (Respawn in {RespawnTime}s)</color>";
+                
+                var uiChat = UnityEngine.Object.FindFirstObjectByType<UIChat>();
+                if (uiChat != null)
+                {
+                    uiChat.Server_SendSystemChatMessage(msg);
+                }
+
+                if (isDrowning)
+                {
+                    player.Server_DespawnCharacter();
+                    CTPEnforcer.Instance.DrowningRespawn(player, RespawnTime);
+                }
+                else
+                {
+                    StartCoroutine(RespawnRoutine());
+                }
+            }
+            else if (player.IsOwner && isDrowning)
+            {
+                player.Client_SetPlayerStateRpc(PlayerState.Spectate, 0f);
+            }
+        }
+
+        private IEnumerator RespawnRoutine()
+        {
+            CTP_KnockdownManager.KnockdownPlayer(player, FallReason.Eliminated);
+            
+            yield return new WaitForSeconds(RespawnTime);
+
+            ResetHealth();
+            CTP_KnockdownManager.RevivePlayer(player.OwnerClientId);
+
+            Vector3 spawnPos = Vector3.zero;
+            if (player.Team.Value == PlayerTeam.Blue)
+                spawnPos = new Vector3(-36.4674f, 0.5f, 36.6389f) + new Vector3(Random.Range(-1.5f, 1.5f), 0, Random.Range(-1.5f, 1.5f));
+            else
+                spawnPos = new Vector3(38.3345f, 0.5f, -35.8137f) + new Vector3(Random.Range(-1.5f, 1.5f), 0, Random.Range(-1.5f, 1.5f));
+
+            if(player.PlayerBody != null)
+            {
+                player.PlayerBody.Server_Teleport(spawnPos, Quaternion.identity);
+            }
+
+            var uiChat = UnityEngine.Object.FindFirstObjectByType<UIChat>();
+            if (uiChat != null)
+            {
+                uiChat.Server_SendSystemChatMessage($"<color=yellow>{player.Username.Value} has respawned.</color>");
             }
         }
 
@@ -120,37 +245,21 @@ namespace CTP
         {
             Transform cam = GetCamera();
             if (cam == null) return;
-
-            // Check if Camera (eyes) is underwater, not just the feet
             bool camBelowWater = cam.position.y < -1.6f;
-
-            if (camBelowWater && !isUnderwater)
-            {
-                SetUnderwaterVisuals(true);
-            }
-            else if (!camBelowWater && isUnderwater)
-            {
-                SetUnderwaterVisuals(false);
-            }
+            if (camBelowWater && !isUnderwater) SetUnderwaterVisuals(true);
+            else if (!camBelowWater && isUnderwater) SetUnderwaterVisuals(false);
         }
 
         private void SetUnderwaterVisuals(bool active)
         {
             if (!defaultsCaptured) CaptureDefaultVisuals();
-
             isUnderwater = active;
-
-            if (active)
-            {
-                // Set thick blue fog
+            if (active) {
                 RenderSettings.fog = true;
                 RenderSettings.fogMode = FogMode.Exponential;
-                RenderSettings.fogDensity = 0.15f; // Thick fog
-                RenderSettings.fogColor = new Color(0.0f, 0.1f, 0.25f, 1.0f); // Deep Blue
-            }
-            else
-            {
-                // Restore original settings
+                RenderSettings.fogDensity = 0.15f; 
+                RenderSettings.fogColor = new Color(0.0f, 0.1f, 0.25f, 1.0f); 
+            } else {
                 RenderSettings.fog = originalFogEnabled;
                 RenderSettings.fogMode = originalFogMode;
                 RenderSettings.fogDensity = originalFogDensity;
@@ -174,145 +283,24 @@ namespace CTP
             return null;
         }
 
-        public void TakeDamage(float amount, bool isDrowning = false)
-        {
-            CurrentHP -= amount;
-
-            if (NetworkManager.Singleton.IsServer)
-            {
-                if (Mathf.Abs(CurrentHP - lastSyncedHP) > 5f || CurrentHP <= 0f)
-                {
-                    if(CTP_HealthSyncer.Instance != null)
-                    {
-                        CTP_HealthSyncer.Instance.UpdateHealth_ClientRpc(player.OwnerClientId, CurrentHP);
-                    }
-                    lastSyncedHP = CurrentHP;
-                }
-            }
-
-            if (CurrentHP <= 0)
-            {
-                Die(isDrowning);
-            }
-        }
-
-        public void ResetHealth()
-        {
-            CurrentHP = MaxHP;
-            IsDead = false;
-            if (NetworkManager.Singleton.IsServer)
-            {
-                if (CTP_HealthSyncer.Instance != null)
-                {
-                    CTP_HealthSyncer.Instance.UpdateHealth_ClientRpc(player.OwnerClientId, CurrentHP);
-                }
-                lastSyncedHP = CurrentHP;
-            }
-        }
-
-        public void SetHPClientSide(float hp)
-        {
-            CurrentHP = hp;
-
-            var message = new Dictionary<string, object>
-            {
-                { "clientId", player.OwnerClientId },
-                { "newHP", CurrentHP },
-                { "maxHP", MaxHP }
-            };
-            MonoBehaviourSingleton<EventManager>.Instance.TriggerEvent("Event_Client_OnHealthChanged", message);
-
-            if (CurrentHP <= 0 && !IsDead)
-            {
-                IsDead = true;
-                if (canvasRoot != null) Destroy(canvasRoot);
-            }
-        }
-
-        private void Die(bool isDrowning = false)
-        {
-            IsDead = true;
-            CurrentHP = 0;
-            
-            if (player.IsOwner) SetUnderwaterVisuals(false);
-            if (canvasRoot != null) Destroy(canvasRoot);
-
-            if (NetworkManager.Singleton.IsServer)
-            {
-                if (isDrowning)
-                {
-                    player.Server_DespawnCharacter();
-                    CTPEnforcer.Instance.DrowningRespawn(player);
-                }
-                else
-                {
-                    StartCoroutine(RespawnCoroutine());
-                }
-            }
-            else if (player.IsOwner && isDrowning)
-            {
-                player.Client_SetPlayerStateRpc(PlayerState.Spectate, 0f);
-            }
-        }
-
-        private IEnumerator RespawnCoroutine()
-        {
-            CTP_KnockdownManager.KnockdownPlayer(player, FallReason.Eliminated);
-
-            yield return new WaitForSeconds(RespawnTime);
-
-            // TODO: Implement proper spawn point logic
-            var spawnPoint = player.transform;
-            var playerBody = player.PlayerBody;
-            if (playerBody != null)
-            {
-                var rb = playerBody.GetComponent<Rigidbody>();
-                if (rb != null)
-                {
-                    rb.position = spawnPoint.position;
-                    rb.rotation = spawnPoint.rotation;
-                    rb.linearVelocity = Vector3.zero;
-                    rb.angularVelocity = Vector3.zero;
-                }
-            }
-            ResetHealth();
-            CTP_KnockdownManager.RevivePlayer(player.OwnerClientId);
-
-            SendRespawnMessageClientRpc(new ClientRpcParams { Send = new ClientRpcSendParams { TargetClientIds = new[] { player.OwnerClientId } } });
-        }
-
-        [ClientRpc]
-        private void SendRespawnMessageClientRpc(ClientRpcParams clientRpcParams = default)
-        {
-            var uiChat = FindFirstObjectByType<UIChat>();
-            if (uiChat != null)
-            {
-                uiChat.AddChatMessage("You have respawned.");
-            }
-        }
-
         private void CreateHealthBar(Transform parent)
         {
             canvasRoot = new GameObject("HealthBar_Canvas");
             canvasRoot.transform.SetParent(parent, false);
             canvasRoot.transform.localPosition = new Vector3(0, 2.3f, 0); 
             canvasRoot.transform.localScale = new Vector3(0.005f, 0.005f, 0.005f); 
-
             Canvas c = canvasRoot.AddComponent<Canvas>();
             c.renderMode = RenderMode.WorldSpace;
             c.sortingOrder = 999; 
-
             GameObject bgObj = new GameObject("Background");
             bgObj.transform.SetParent(canvasRoot.transform, false);
             Image bgImg = bgObj.AddComponent<Image>();
             bgImg.sprite = CTP_AssetLoader.TextureToSprite(CTP_AssetLoader.LoadTexture("hp_bg.png", Color.gray));
             bgImg.rectTransform.sizeDelta = new Vector2(200, 35);
-
             GameObject fillObj = new GameObject("Fill");
             fillObj.transform.SetParent(canvasRoot.transform, false);
             fillImage = fillObj.AddComponent<Image>();
             fillImage.sprite = CTP_AssetLoader.TextureToSprite(CTP_AssetLoader.LoadTexture("hp_fill.png", Color.green));
-            
             fillImage.type = Image.Type.Filled;
             fillImage.fillMethod = Image.FillMethod.Horizontal;
             fillImage.fillOrigin = (int)Image.OriginHorizontal.Left;
@@ -320,13 +308,25 @@ namespace CTP
             fillImage.color = Color.white; 
         }
 
-        public override void OnDestroy()
+        private void UpdateHealthBar()
+        {
+             if (canvasRoot != null && fillImage != null)
+            {
+                Transform cam = GetCamera();
+                if (cam != null)
+                    canvasRoot.transform.LookAt(canvasRoot.transform.position + cam.rotation * Vector3.forward, cam.rotation * Vector3.up);
+
+                float rawPercent = Mathf.Clamp01(CurrentHP / MaxHP);
+                float steps = 7.0f;
+                float discreteFill = Mathf.Ceil(rawPercent * steps) / steps;
+                fillImage.fillAmount = discreteFill;
+            }
+        }
+
+        private void OnDestroy()
         {
             if (canvasRoot != null) Destroy(canvasRoot);
-
-            // Restore any visuals that might be lingering
             if (player != null && player.IsOwner) SetUnderwaterVisuals(false);
-            base.OnDestroy();
         }
     }
 }

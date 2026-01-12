@@ -183,8 +183,7 @@ namespace CTP
 
                     if (CTP_KnockdownManager.SuppressedStandUp.Contains(clientId))
                     {
-                        Debug.Log($"[CTP] Blocked OnStandUp for {__instance.Player.Username.Value}");
-                        return false; // Block standup
+                        return false; 
                     }
 
                     return true;
@@ -212,7 +211,6 @@ namespace CTP
 
                     if (CTP_KnockdownManager.SuppressedStandUp.Contains(clientId))
                     {
-                        // Force them to stay fallen - this prevents the base game from calling OnStandUp()
                         if (!__instance.HasFallen)
                         {
                             __instance.HasFallen = true;
@@ -222,7 +220,6 @@ namespace CTP
                             __instance.HasSlipped = false;
                         }
                         
-                        // Also force balance to 0 to keep them from becoming upright
                         if (__instance.KeepUpright.Balance > 0.1f)
                         {
                             __instance.KeepUpright.Balance = 0f;
@@ -249,7 +246,7 @@ namespace CTP
             [HarmonyPostfix]
             static void Postfix()
             {
-                MonoBehaviourSingleton<EventManager>.Instance.AddEventListener("Event_OnPlayerHPChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
+                MonoBehaviourSingleton<EventManager>.Instance.AddEventListener("Event_Client_OnHealthChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
             }
         }
         
@@ -266,7 +263,7 @@ namespace CTP
             [HarmonyPostfix]
             static void Postfix()
             {
-                MonoBehaviourSingleton<EventManager>.Instance.RemoveEventListener("Event_OnPlayerHPChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
+                MonoBehaviourSingleton<EventManager>.Instance.RemoveEventListener("Event_Client_OnHealthChanged", new Action<Dictionary<string, object>>(UIHUDController_HealthPatch.Event_OnPlayerHPChanged));
             }
         }
         
@@ -276,10 +273,15 @@ namespace CTP
             {
                 try
                 {
-                    if (message["player"] is Player player && player.IsLocalPlayer)
+                    if (message.ContainsKey("clientId"))
                     {
-                        var newHP = (float)message["newHP"];
-                        UIGameState_Helper.UpdateHp(newHP);
+                        ulong id = (ulong)message["clientId"];
+                        if (NetworkManager.Singleton.LocalClientId == id)
+                        {
+                            var newHP = (float)message["newHP"];
+                            // Debug.Log($"[CTP] HUD Update Event Received for local player. HP: {newHP}");
+                            UIGameState_Helper.UpdateHp(newHP);
+                        }
                     }
                 }
                 catch (Exception e)
@@ -302,7 +304,6 @@ namespace CTP
                         var rb = __instance.GetComponent<Rigidbody>();
                         if (rb != null)
                         {
-                            // Define the rectangular exclusion zone for the tree
                             float treeExclusionMinX = -7.0f;
                             float treeExclusionMaxX = 5.0f;
                             float treeExclusionMinZ = -4.0f;
@@ -321,6 +322,71 @@ namespace CTP
                             rb.angularVelocity = Vector3.zero;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerController))]
+    public static class PlayerController_Patches
+    {
+        [HarmonyPatch("Event_Client_OnPlayerRequestPositionSelect")]
+        [HarmonyPrefix]
+        public static bool Prefix_RequestPositionSelect(PlayerController __instance)
+        {
+            try
+            {
+                var player = __instance.GetComponent<Player>();
+                if (player != null && player.IsOwner)
+                {
+                    var hp = player.GetComponent<CTP_PlayerHealth>();
+                    if (hp != null && hp.IsDead) return false; 
+
+                    if (GameManager.Instance != null && GameManager.Instance.GameState.Value.Phase == GamePhase.Playing)
+                    {
+                        return false;
+                    }
+                }
+            }
+            catch(Exception ex) { Debug.LogError($"[CTP] Error: {ex}"); }
+            return true;
+        }
+
+        [HarmonyPatch("Event_Client_OnPauseMenuClickSwitchTeam")]
+        [HarmonyPrefix]
+        public static bool Prefix_SwitchTeam(PlayerController __instance)
+        {
+            try
+            {
+                var player = __instance.GetComponent<Player>();
+                if (player != null && player.IsOwner)
+                {
+                    var hp = player.GetComponent<CTP_PlayerHealth>();
+                    if (hp != null && hp.IsDead) return false; 
+
+                    if (GameManager.Instance != null && GameManager.Instance.GameState.Value.Phase == GamePhase.Playing)
+                    {
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError($"[CTP] Error: {ex}"); }
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(GameManager), "OnNetworkSpawn")]
+    public static class GameManagerDurationPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(GameManager __instance)
+        {
+            if (NetworkManager.Singleton.IsServer)
+            {
+                if (__instance.PhaseDurationMap.ContainsKey(GamePhase.Playing))
+                {
+                    __instance.PhaseDurationMap[GamePhase.Playing] = 900; // 15 minutes
+                    Debug.Log("[CTP] Overriding Playing Phase duration to 15 minutes (900s).");
                 }
             }
         }
@@ -459,9 +525,11 @@ namespace CTP
                 uiHealthBarGo.AddComponent<UIHealthBarController>();
                 DontDestroyOnLoad(uiHealthBarGo);
 
-                GameObject healthSyncerGo = new GameObject("CTP_HealthSyncer");
-                healthSyncerGo.AddComponent<CTP_HealthSyncer>();
-                DontDestroyOnLoad(healthSyncerGo);
+                // CTP_HealthSyncer removed, logic moved to CTP_PlayerHealth via CustomMessaging
+
+                GameObject scoringMgr = new GameObject("CTP_ScoringManager");
+                scoringMgr.AddComponent<CTP_ScoringManager>();
+                DontDestroyOnLoad(scoringMgr);
 
                 uiHealthBarInitialized = true;
             }
@@ -471,6 +539,8 @@ namespace CTP
 
         IEnumerator ProcessMapRoutine()
         {
+            if (spawnedMapInstance != null) yield break;
+
             yield return new WaitForSeconds(1.0f);
 
             if (spawnedMapInstance == null) yield return StartCoroutine(LoadAndInstantiateMap());
@@ -484,6 +554,7 @@ namespace CTP
                     HandleSceneCleanup();
                     ConfigureCustomMapPhysics(spawnedMapInstance);
                     HandleGoals();
+                    HandleCapturePads(); 
                     OverrideVanillaBounds();
                     HandleAudioEnvironment();
                     HandleSkybox();
@@ -600,6 +671,42 @@ namespace CTP
                     rb.isKinematic = true;
                     rb.useGravity = false;
                 }
+            }
+        }
+
+        void HandleCapturePads()
+        {
+            GameObject bluePad = FindObjectIncludingInactive("BlueCapturePad") ?? FindObjectIncludingInactive("BlueZone");
+            GameObject redPad = FindObjectIncludingInactive("RedCapturePad") ?? FindObjectIncludingInactive("RedZone");
+
+            SetupCapturePad(bluePad, PlayerTeam.Blue);
+            SetupCapturePad(redPad, PlayerTeam.Red);
+        }
+
+        void SetupCapturePad(GameObject pad, PlayerTeam team)
+        {
+            if (pad != null)
+            {
+                pad.gameObject.layer = LAYER_ICE; 
+
+                var allColliders = pad.GetComponentsInChildren<Collider>(true);
+                foreach (var c in allColliders)
+                {
+                    c.sharedMaterial = customIceMaterial; // Frictionless
+                    c.gameObject.layer = LAYER_ICE;       // Ice layer
+                    c.isTrigger = false;                  // No triggers
+                    
+                    if (c is MeshCollider mc)
+                    {
+                        mc.convex = false; // Pure mesh floor
+                    }
+                }
+
+                Log($"Setup capture pad for {team} on object {pad.name} (Physics/Visual Only)");
+            }
+            else
+            {
+                Log($"WARNING: Could not find capture pad for {team}");
             }
         }
 
@@ -737,14 +844,14 @@ namespace CTP
             }
         }
 
-        public void DrowningRespawn(Player player)
+        public void DrowningRespawn(Player player, float delay)
         {
-            StartCoroutine(DrowningRespawnCoroutine(player));
+            StartCoroutine(DrowningRespawnCoroutine(player, delay));
         }
 
-        private IEnumerator DrowningRespawnCoroutine(Player player)
+        private IEnumerator DrowningRespawnCoroutine(Player player, float delay)
         {
-            yield return new WaitForSeconds(5.0f);
+            yield return new WaitForSeconds(delay);
 
             if (player == null || !player.NetworkObject.IsSpawned)
             {
@@ -763,15 +870,22 @@ namespace CTP
                 Vector3 spawnPos = Vector3.zero;
                 if (player.Team.Value == PlayerTeam.Blue)
                 {
-                    spawnPos = new Vector3(-36.4674f, 0.0038f, 36.6389f) + new Vector3(UnityEngine.Random.Range(-1.5f, 1.5f), 0, UnityEngine.Random.Range(-1.5f, 1.5f));
+                    spawnPos = new Vector3(-36.4674f, 0.5f, 36.6389f) + new Vector3(UnityEngine.Random.Range(-1.5f, 1.5f), 0, UnityEngine.Random.Range(-1.5f, 1.5f));
                 }
                 else if (player.Team.Value == PlayerTeam.Red)
                 {
-                    spawnPos = new Vector3(38.3345f, 0.0038f, -35.8137f) + new Vector3(UnityEngine.Random.Range(-1.5f, 1.5f), 0, UnityEngine.Random.Range(-1.5f, 1.5f));
+                    spawnPos = new Vector3(38.3345f, 0.5f, -35.8137f) + new Vector3(UnityEngine.Random.Range(-1.5f, 1.5f), 0, UnityEngine.Random.Range(-1.5f, 1.5f));
                 }
                 
                 player.Server_RespawnCharacter(spawnPos, Quaternion.identity, player.Role.Value);
                 player.Client_SetPlayerStateRpc(PlayerState.Play, 0.1f);
+
+                // Send Respawn Message
+                var uiChat = UnityEngine.Object.FindFirstObjectByType<UIChat>();
+                if (uiChat != null)
+                {
+                    uiChat.Server_SendSystemChatMessage($"<color=yellow>{player.Username.Value} has respawned.</color>");
+                }
             }
         }
     }
@@ -782,6 +896,20 @@ namespace CTP
         
         public static void UpdateHp(float currentHP)
         {
+            // Dynamic re-fetch if reference is lost
+            if (hpLabel == null)
+            {
+                var uiHud = UnityEngine.Object.FindFirstObjectByType<UIHUD>();
+                if (uiHud != null)
+                {
+                    var doc = uiHud.GetComponent<UnityEngine.UIElements.UIDocument>();
+                    if (doc != null && doc.rootVisualElement != null)
+                    {
+                        hpLabel = doc.rootVisualElement.Q<UnityEngine.UIElements.Label>("PlayerHPLabel");
+                    }
+                }
+            }
+
             if (hpLabel != null)
             {
                 hpLabel.text = $"HP: {Mathf.RoundToInt(currentHP)}";
@@ -871,8 +999,8 @@ namespace CTP
     [HarmonyPatch]
     public static class PlayerSpawningPatches
     {
-        private static readonly Vector3 BlueSpawnPos = new Vector3(-36.4674f, 0.0038f, 36.6389f);
-        private static readonly Vector3 RedSpawnPos = new Vector3(38.3345f, 0.0038f, -35.8137f);
+        private static readonly Vector3 BlueSpawnPos = new Vector3(-36.4674f, 0.5f, 36.6389f);
+        private static readonly Vector3 RedSpawnPos = new Vector3(38.3345f, 0.5f, -35.8137f);
 
         [HarmonyPatch(typeof(Player), "Server_SpawnCharacter")]
         [HarmonyPrefix]

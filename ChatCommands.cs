@@ -15,6 +15,10 @@ namespace CTP
             if (string.IsNullOrEmpty(message)) return true;
             string cleanedMessage = message.Trim();
             
+            // Debug Log to confirm interception
+            if (cleanedMessage.StartsWith("/")) 
+                Debug.Log($"[CTP] Chat Command Intercepted: {cleanedMessage}");
+
             if (cleanedMessage.StartsWith("/damage", StringComparison.OrdinalIgnoreCase))
             {
                 float damageAmount = 25f;
@@ -31,6 +35,7 @@ namespace CTP
             }
             if (cleanedMessage.StartsWith("/kill", StringComparison.OrdinalIgnoreCase))
             {
+                Debug.Log("[CTP] Executing /kill command...");
                 ApplyDamage(__instance, 9999f);
                 return false;
             }
@@ -40,7 +45,6 @@ namespace CTP
                 return false;
             }
 
-            // --- New Command: /sethp ---
             if (cleanedMessage.StartsWith("/sethp", StringComparison.OrdinalIgnoreCase))
             {
                 string[] parts = cleanedMessage.Split(' ');
@@ -93,38 +97,33 @@ namespace CTP
 
         private static void ApplyDamage(UIChat chat, float amount)
         {
-            // If I am the HOST, I can apply damage directly and it will sync.
-            if (NetworkManager.Singleton.IsServer)
+            Debug.Log($"[CTP] ApplyDamage called with amount: {amount}. IsServer: {NetworkManager.Singleton.IsServer}");
+            
+            // Note: In Host mode, IsServer is True and the Host Player is IsOwner = True.
+            
+            var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
+            bool foundLocal = false;
+
+            foreach (var p in allPlayers)
             {
-                var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
-                foreach (var p in allPlayers)
+                if (p.IsOwner) 
                 {
-                    if (p.IsOwner) // Host hurting Host
+                    foundLocal = true;
+                    var hp = p.GetComponent<CTP_PlayerHealth>();
+                    if(hp) 
                     {
-                        var hp = p.GetComponent<CTP_PlayerHealth>();
-                        if(hp) hp.TakeDamage(amount);
-                        return;
+                        Debug.Log($"[CTP] Found local player {p.Username.Value}. Applying damage.");
+                        hp.TakeDamage(amount);
                     }
+                    else
+                    {
+                        Debug.LogError($"[CTP] Local player {p.Username.Value} has NO CTP_PlayerHealth component!");
+                    }
+                    return;
                 }
             }
-            else
-            {
-                // If I am a CLIENT, I can't force the server to lower my HP easily via this specific command
-                // without adding a new message type.
-                // For now, /damage on Client is purely visual test.
-                SendResponse(chat, "<b>[HP]</b> /damage as Client is local visual test only.");
-                
-                var allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
-                foreach (var p in allPlayers)
-                {
-                    if (p.IsOwner)
-                    {
-                        var hp = p.GetComponent<CTP_PlayerHealth>();
-                        if(hp) hp.TakeDamage(amount); // Local update
-                        return;
-                    }
-                }
-            }
+
+            if (!foundLocal) Debug.LogError("[CTP] ApplyDamage could not find a local player to hurt.");
         }
 
         private static void SendResponse(UIChat chat, string message)
