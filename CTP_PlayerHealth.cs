@@ -96,7 +96,12 @@ namespace CTP
         public void TakeDamage(float amount, bool isDrowning = false)
         {
             if (IsDead) return;
-
+            // --- TANK LOGIC START ---
+            // If the player is a Goalie and not drowning, reduce damage significantly.
+            if (!isDrowning && player.Role.Value == PlayerRole.Goalie)
+            {
+                amount *= 0.25f; // Goalies take only 25% of incoming damage (75% reduction)
+            }
             CurrentHP -= amount;
 
             // Sync to clients
@@ -196,6 +201,11 @@ namespace CTP
                 if (uiChat != null)
                 {
                     uiChat.Server_SendSystemChatMessage(msg);
+                }
+
+                if (CTP_ScoringManager.Instance != null)
+                {
+                    CTP_ScoringManager.Instance.RegisterKill(player.Team.Value);
                 }
 
                 if (isDrowning)

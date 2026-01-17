@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using Unity.Netcode;
+using System.Linq;
 
 namespace CTP
 {
@@ -12,8 +13,8 @@ namespace CTP
         private int redPucksOnPad = 0;
         private int bluePucksOnPad = 0;
         
-        private float internalRedScore = 0;
-        private float internalBlueScore = 0;
+        public float internalRedScore = 0;
+        public float internalBlueScore = 0;
         
         private const int ScoreToWin = 100;
         private const float ScoreMultiplier = 0.05f; 
@@ -21,14 +22,17 @@ namespace CTP
         private bool isRoundOver = false;
         private GamePhase lastPhase = GamePhase.None;
 
-        // Radius for capture
+        // Radius for capture AND sticky physics
         private const float CaptureRadius = 7.0f; 
+        
+        // 0.90 = Strong braking (like mud). Lower = stickier.
+        private const float StickyFactor = 0.90f; 
 
-        // Dynamic Transforms
         private Transform bluePadTx;
         private Transform redPadTx;
+        
+        private List<Puck> cachedPucks = new List<Puck>();
 
-        // Fallbacks
         private readonly Vector3 BlueBaseFallback = new Vector3(-36.4674f, 0.0f, 36.6389f);
         private readonly Vector3 RedBaseFallback = new Vector3(38.3345f, 0.0f, -35.8137f);
 
@@ -49,10 +53,11 @@ namespace CTP
             if (NetworkManager.Singleton.IsServer)
             {
                 StartCoroutine(ScoreUpdateRoutine());
+                StartCoroutine(RefreshPuckCacheRoutine());
             }
         }
 
-        private void ResetGame()
+        public void ResetGame()
         {
             Debug.Log("[CTP] Resetting Scoring Manager for new game.");
             internalRedScore = 0;
@@ -64,6 +69,80 @@ namespace CTP
             if (GameManager.Instance != null)
             {
                 GameManager.Instance.Server_UpdateGameState(null, null, 1, 0, 0);
+            }
+        }
+
+        public void RegisterKill(PlayerTeam victimTeam)
+        {
+            if (!NetworkManager.Singleton.IsServer || isRoundOver) return;
+
+            if (victimTeam == PlayerTeam.Blue) internalRedScore += 1.0f;
+            else if (victimTeam == PlayerTeam.Red) internalBlueScore += 1.0f;
+
+            int displayRed = Mathf.FloorToInt(internalRedScore);
+            int displayBlue = Mathf.FloorToInt(internalBlueScore);
+            
+            if (GameManager.Instance != null)
+            {
+                GameManager.Instance.Server_UpdateGameState(null, null, null, displayBlue, displayRed);
+            }
+            CheckWinCondition();
+        }
+
+        // --- NEW: PHYSICS BRAKING LOOP ---
+        private void FixedUpdate()
+        {
+            if (!NetworkManager.Singleton.IsServer || isRoundOver) return;
+            if (bluePadTx == null || redPadTx == null) return;
+
+            Vector2 flatBlue = new Vector2(bluePadTx.position.x, bluePadTx.position.z);
+            Vector2 flatRed = new Vector2(redPadTx.position.x, redPadTx.position.z);
+
+            // Iterate backwards to safely handle destroyed pucks
+            for (int i = cachedPucks.Count - 1; i >= 0; i--)
+            {
+                Puck p = cachedPucks[i];
+                if (p == null) 
+                {
+                    cachedPucks.RemoveAt(i);
+                    continue;
+                }
+
+                Vector3 pPos = p.transform.position;
+                Vector2 flatPuck = new Vector2(pPos.x, pPos.z);
+
+                // Check Red Pad
+                if (Vector2.Distance(flatPuck, flatRed) <= CaptureRadius)
+                {
+                    ApplyBrakes(p);
+                }
+                // Check Blue Pad
+                else if (Vector2.Distance(flatPuck, flatBlue) <= CaptureRadius)
+                {
+                    ApplyBrakes(p);
+                }
+            }
+        }
+
+        private void ApplyBrakes(Puck p)
+        {
+            Rigidbody rb = p.GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                // Multiply velocity by < 1 to slow it down every frame
+                rb.linearVelocity *= StickyFactor;
+                rb.angularVelocity *= StickyFactor;
+            }
+        }
+
+        private IEnumerator RefreshPuckCacheRoutine()
+        {
+            while (true)
+            {
+                // Find all pucks every 1 second
+                var found = FindObjectsByType<Puck>(FindObjectsSortMode.None);
+                cachedPucks = found.ToList();
+                yield return new WaitForSeconds(1.0f);
             }
         }
 
@@ -80,47 +159,19 @@ namespace CTP
 
                 GamePhase currentPhase = GameManager.Instance.GameState.Value.Phase;
 
-                if (currentPhase == GamePhase.Warmup && lastPhase != GamePhase.Warmup)
-                {
-                    ResetGame();
-                }
-
-                if (currentPhase == GamePhase.PeriodOver && lastPhase == GamePhase.Playing)
-                {
-                    CheckWinnerAndEnd();
-                }
+                if (currentPhase == GamePhase.Warmup && lastPhase != GamePhase.Warmup) ResetGame();
+                if (currentPhase == GamePhase.PeriodOver && lastPhase == GamePhase.Playing) CheckWinnerAndEnd();
 
                 lastPhase = currentPhase;
 
-                if (bluePadTx == null || redPadTx == null)
-                {
-                    LocatePads();
-                }
+                if (bluePadTx == null || redPadTx == null) LocatePads();
 
-                if (bluePadTx != null && redPadTx != null && 
-                    !isRoundOver && 
-                    currentPhase == GamePhase.Playing)
+                if (bluePadTx != null && redPadTx != null && !isRoundOver && currentPhase == GamePhase.Playing)
                 {
                     CalculatePuckCounts();
                     ProcessScores();
                 }
             }
-        }
-
-        private void CheckWinnerAndEnd()
-        {
-            isRoundOver = true;
-            string msg = "";
-            if (internalRedScore > internalBlueScore)
-                msg = $"<color=red>RED WINS by Points! ({Mathf.FloorToInt(internalRedScore)} vs {Mathf.FloorToInt(internalBlueScore)})</color>";
-            else if (internalBlueScore > internalRedScore)
-                msg = $"<color=blue>BLUE WINS by Points! ({Mathf.FloorToInt(internalBlueScore)} vs {Mathf.FloorToInt(internalRedScore)})</color>";
-            else
-                msg = "<color=yellow>DRAW GAME!</color>";
-
-            BroadcastScoreUpdate(msg);
-            
-            GameManager.Instance.Server_UpdateGameState(GamePhase.GameOver, null, null, null, null);
         }
 
         private void LocatePads()
@@ -159,19 +210,20 @@ namespace CTP
             int currentRed = 0;
             int currentBlue = 0;
 
-            var pucks = FindObjectsByType<Puck>(FindObjectsSortMode.None);
-            
-            Vector3 flatBlue = new Vector3(bluePadTx.position.x, 0, bluePadTx.position.z);
-            Vector3 flatRed = new Vector3(redPadTx.position.x, 0, redPadTx.position.z);
+            if (bluePadTx == null || redPadTx == null) return;
 
-            foreach (var p in pucks)
+            Vector2 flatBlue = new Vector2(bluePadTx.position.x, bluePadTx.position.z);
+            Vector2 flatRed = new Vector2(redPadTx.position.x, redPadTx.position.z);
+
+            // Use the cached list for scoring too (Efficient!)
+            foreach (var p in cachedPucks)
             {
                 if (p == null) continue;
                 Vector3 pPos = p.transform.position;
-                Vector3 flatPuck = new Vector3(pPos.x, 0, pPos.z);
+                Vector2 flatPuck = new Vector2(pPos.x, pPos.z);
 
-                if (Vector3.Distance(flatPuck, flatBlue) <= CaptureRadius) currentBlue++;
-                else if (Vector3.Distance(flatPuck, flatRed) <= CaptureRadius) currentRed++;
+                if (Vector2.Distance(flatPuck, flatBlue) <= CaptureRadius) currentBlue++;
+                else if (Vector2.Distance(flatPuck, flatRed) <= CaptureRadius) currentRed++;
             }
 
             if (currentBlue != bluePucksOnPad)
@@ -209,16 +261,38 @@ namespace CTP
                 scoreChanged = true;
             }
 
+            if (scoreChanged)
+            {
+                int displayRed = Mathf.FloorToInt(internalRedScore);
+                int displayBlue = Mathf.FloorToInt(internalBlueScore);
+                GameManager.Instance.Server_UpdateGameState(null, null, null, displayBlue, displayRed);
+            }
+            CheckWinCondition();
+        }
+
+        private void CheckWinCondition()
+        {
             int displayRed = Mathf.FloorToInt(internalRedScore);
             int displayBlue = Mathf.FloorToInt(internalBlueScore);
 
-            if (scoreChanged)
-            {
-                GameManager.Instance.Server_UpdateGameState(null, null, null, displayBlue, displayRed);
-            }
-
             if (displayRed >= ScoreToWin) EndGame(PlayerTeam.Red);
             else if (displayBlue >= ScoreToWin) EndGame(PlayerTeam.Blue);
+        }
+
+        private void CheckWinnerAndEnd()
+        {
+            isRoundOver = true;
+            string msg = "";
+            if (internalRedScore > internalBlueScore)
+                msg = $"<color=red>RED WINS by Points! ({Mathf.FloorToInt(internalRedScore)} vs {Mathf.FloorToInt(internalBlueScore)})</color>";
+            else if (internalBlueScore > internalRedScore)
+                msg = $"<color=blue>BLUE WINS by Points! ({Mathf.FloorToInt(internalBlueScore)} vs {Mathf.FloorToInt(internalRedScore)})</color>";
+            else
+                msg = "<color=yellow>DRAW GAME!</color>";
+
+            BroadcastScoreUpdate(msg);
+            
+            GameManager.Instance.Server_UpdateGameState(GamePhase.GameOver, null, null, null, null);
         }
 
         private void EndGame(PlayerTeam winningTeam)

@@ -1,0 +1,104 @@
+# Capture The Puck (CTP) Mod Project Summary
+
+This document provides a summary of the CTP (Capture The Puck) mod project, including its features, major code files, namespaces, classes, and targeted game objects.
+
+## Core Features
+
+*   **Capture the Puck Gamemode:** The primary feature is a "Capture the Puck" style gamemode where teams score points by having pucks on their designated capture pads. Points are also awarded for eliminating players on the opposing team.
+*   **Player Health and Knockdown System:** Players have health points (HP) and can be knocked down or "eliminated" by taking damage.
+    *   **Damage Sources:** Damage is applied from pucks, stick slashes, and body checks.
+    *   **Headshots:** High-speed pucks hitting a player's head results in an instant elimination. Goalies are immune to this.
+    *   **Role-Based Damage:** Goalies have significant damage reduction against all non-drowning damage sources.
+    *   **Hazards:** Players can drown in water hazards, forcing a respawn.
+    *   **Revival:** Fallen players can be revived by teammates.
+*   **Stick-on-Player Collisions:** The mod enables physics collisions between player sticks and other players, allowing for stick-based damage.
+*   **Custom Map and Environment:** The mod loads a custom map from an asset bundle, replacing the default arena. This includes custom physics materials for ice and boards, a custom skybox, and adjusted audio environments.
+*   **UI Enhancements:** A new screen-space UI element for the local player's health is added to the HUD. In-game chat commands are available for debugging and administration.
+*   **Networking Improvements:** The mod includes patches to improve network synchronization for objects like the puck and sticks, aiming for a smoother online experience.
+*   **Modified Puck Spawning:** The default puck spawning is replaced with a system that scatters pucks across the rink at the start of a faceoff. A hazard-detection system also respawns pucks that get stuck in map geometry.
+
+## Project File Structure
+
+The project consists of the following major C# source files:
+
+*   `MaxPractice.cs`: The main file containing the mod's entry point, Harmony patches for core game mechanics, and the `CTPEnforcer` class that manages the custom map and game rules.
+*   `CTP_PlayerHealth.cs`: Manages individual player health, damage, death, and respawning.
+*   `CTP_HeadHitbox.cs`: Component attached to player heads to detect fatal puck collisions.
+*   `CTP_KnockdownManager.cs`: Handles the logic for knocking down and reviving players.
+*   `CTP_ScoringManager.cs`: Manages the scoring system for the Capture the Puck gamemode.
+*   `CTP_CapturePlatform.cs`: A simple component to identify the capture platforms for each team.
+*   `CTP_HealthSyncer.cs`: A NetworkBehaviour to synchronize health data between the server and clients.
+*   `UIHealthBar.cs` & `UIHealthBarController.cs`: Manages the creation and updates of the player health bar UI.
+*   `TeamPucks.cs`: Modifies the puck spawning behavior.
+*   `ChatCommands.cs`: Implements chat commands for debugging and administration.
+*   `TextureUtils.cs`: A utility class (`CTP_AssetLoader`) for loading textures from files.
+
+## Namespaces
+
+The primary namespace for this mod is `CTP`.
+
+## Classes and Members
+
+### CTP Namespace
+
+*   **`CaptureThePuck_Mod` (inherits `IPuckMod`)**: The main entry point for the mod.
+    *   `OnEnable()`: Initializes the mod and applies Harmony patches.
+    *   `OnDisable()`: Disables the mod and removes patches.
+
+*   **`CTPEnforcer` (inherits `MonoBehaviour`)**: Manages the custom map, game rules, environment, and stick collisions.
+    *   **Game Objects Targeted**: `[CaptureThePuck_ModHost]`, `UIHealthBarController`, `CTP_ScoringManager`, `[CaptureThePuck_Map]`, `Barrier - Left`, `Barrier - Right`, `Barrier`, `Ice Bottom`, `Ice Top`, `Level`, `BlueCapturePad`, `BlueZone`, `RedCapturePad`, `RedZone`, `Goal Red`, `Goal Blue`, `GoalSpawn_0`, `GoalSpawn_1`.
+
+*   **`CTP_PlayerHealth` (inherits `MonoBehaviour`)**:
+    *   **Fields**: `MaxHP`, `CurrentHP`, `IsDead`, `RespawnTime`
+    *   **Methods**: `TakeDamage()`, `ResetHealth()`, `SetHPClientSide()`
+    *   **Features**: Includes logic for drowning and damage reduction for Goalies.
+
+*   **`CTP_HeadHitbox` (inherits `MonoBehaviour`)**:
+    *   **Features**: Detects trigger collisions with pucks to apply fatal headshot damage to its parent `CTP_PlayerHealth` component.
+
+*   **`CTP_KnockdownManager` (static class)**:
+    *   **Enum**: `FallReason` (`None`, `Eliminated`, `Drowned`)
+    *   **Fields**: `fallenPlayers`, `SuppressedStandUp`
+    *   **Methods**: `KnockdownPlayer()`, `RevivePlayer()`, `IsPlayerFallen()`
+
+*   **`CTP_ScoringManager` (inherits `MonoBehaviour`)**:
+    *   **Features**: Awards points for pucks on capture pads and for player eliminations. Applies a physics-based braking force to slow pucks on capture pads.
+    *   **Game Objects Targeted**: `BlueCapturePad`, `BlueZone`, `RedCapturePad`, `RedZone`
+
+*   **`CTP_CapturePlatform` (inherits `MonoBehaviour`)**:
+    *   **Fields**: `PlatformTeam`
+
+*   **`CTP_HealthSyncer` (inherits `NetworkBehaviour`)**:
+    *   **Methods**: `UpdateHealth_ClientRpc()`
+
+*   **`TeamPucks` (static class)**: Patches `PuckManager`.
+
+*   **`ChatCommands` (static class)**: Patches `UIChat`.
+    *   **Commands**: `/damage`, `/kill`, `/revive`, `/sethp`
+
+*   **`UIHealthBarController` (inherits `MonoBehaviour`)**: Manages the health bar UI component.
+
+### Global Namespace
+
+*   **`UIHealthBar` (inherits `MonoBehaviour`)**: The visual representation of the screen-space health bar.
+    *   **Game Objects Created**: `UIHealthBarCanvas`, `Background`, `Fill`
+
+*   **`CTP_AssetLoader` (static class)**: (Defined in `TextureUtils.cs`)
+    *   **Methods**: `LoadTexture()`, `TextureToSprite()`
+
+## Harmony Patches
+
+The mod makes extensive use of Harmony to modify the base game's behavior. Key patches include:
+
+*   `Player.OnNetworkSpawn`: Adds the `CTP_PlayerHealth` component and sets up the `CTP_HeadHitbox` on the server.
+*   `PlayerBodyV2.Server_OnDeferredCollision`: Applies damage to players on collision from pucks, sticks, and other players.
+*   `PlayerBodyV2.OnStandUp` & `FixedUpdate`: Manages the knockdown state, preventing players from standing up while eliminated.
+*   `PlayerController`: Patches prevent players from switching teams or positions while dead or during a match.
+*   `PuckManager.Server_SpawnPucksForPhase`: Customizes puck spawning.
+*   `Puck.FixedUpdate`: Adds logic to detect and respawn pucks stuck in hazard zones.
+*   `GameManager.OnNetworkSpawn`: Sets the game duration to 15 minutes.
+*   `SynchronizedObjectManager` & `SynchronizedObject`: Improves network synchronization.
+*   `UIChat.Client_SendClientChatMessage`: Intercepts chat messages for commands.
+*   `UIHUDController`: Patches `Start` and `OnDestroy` to hook into game events for updating the health bar, rather than patching `UIHUD` directly.
+
+This summary provides a high-level overview of the CTP mod project. For more detailed information, please refer to the source code files.

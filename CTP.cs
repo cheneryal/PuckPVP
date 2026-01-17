@@ -80,14 +80,60 @@ namespace CTP
             [HarmonyPostfix]
             public static void Postfix(Player __instance)
             {
+                // 1. Add Health Component
                 if (__instance.GetComponent<CTP_PlayerHealth>() == null)
                 {
                     __instance.gameObject.AddComponent<CTP_PlayerHealth>();
                 }
+                // 2. Headshot Setup (New Logic)
+                // We only need to set up the hitboxes on the Server, as that is where damage is processed.
+                if (NetworkManager.Singleton.IsServer)
+                {
+                    SetupHeadHitbox(__instance);
+                }
+            }
+
+            private static void SetupHeadHitbox(Player player)
+            {
+                // Locate the PlayerMesh component (usually on a child object)
+                var playerMesh = player.GetComponentInChildren<PlayerMesh>();
+                if (playerMesh == null)
+                {
+                    Debug.LogWarning($"[CTP] Could not find PlayerMesh for {player.Username.Value}, headshot hitbox skipped.");
+                    return;
+                }
+
+                // 'headBone' is a private field in PlayerMesh, so we use Harmony/Reflection to get it
+                var fieldInfo = AccessTools.Field(typeof(PlayerMesh), "headBone");
+                if (fieldInfo == null)
+                {
+                    Debug.LogError("[CTP] Could not find 'headBone' field via reflection.");
+                    return;
+                }
+
+                Transform headTransform = fieldInfo.GetValue(playerMesh) as Transform;
+                if (headTransform != null)
+                {
+                    // Check if we already added it (prevent duplicates)
+                    if (headTransform.GetComponent<CTP_HeadHitbox>() == null)
+                    {
+                        // Add a Trigger Collider to the head
+                        // We use a trigger so the puck detects the hit, but doesn't physically bounce off the head differently than the body capsule
+                        SphereCollider headCol = headTransform.gameObject.AddComponent<SphereCollider>();
+                        headCol.radius = 0.14f; // Approximate size of the helmet/head
+                        headCol.isTrigger = true; 
+
+                        // Add the detector script
+                        CTP_HeadHitbox hitbox = headTransform.gameObject.AddComponent<CTP_HeadHitbox>();
+                        hitbox.parentHealth = player.GetComponent<CTP_PlayerHealth>();
+                        
+                        Debug.Log($"[CTP] Headshot hitbox attached to {player.Username.Value}");
+                    }
+                }
             }
         }
 
-        [HarmonyPatch(typeof(PlayerBodyV2), "Server_OnDeferredCollision")]
+[HarmonyPatch(typeof(PlayerBodyV2), "Server_OnDeferredCollision")]
         public static class DeferredCollisionPatch
         {
             [HarmonyPostfix]
@@ -96,49 +142,43 @@ namespace CTP
                 if (!NetworkManager.Singleton.IsServer) return;
                 if (gameObject == null) return;
 
-                float damageMultiplier = 0f;
-                float damageCap = 100f;
+                float finalDamage = 0f;
 
                 Puck puck = gameObject.GetComponentInParent<Puck>();
                 Stick stick = gameObject.GetComponentInParent<Stick>();
                 PlayerBodyV2 otherPlayer = gameObject.GetComponentInParent<PlayerBodyV2>();
 
+                // 1. PUCK DAMAGE
                 if (puck != null)
                 {
-                    damageMultiplier = 3.0f; 
-                    damageCap = 34f; 
+                    float dmg = force * 3.0f;
+                    finalDamage = Mathf.Min(dmg, 34f);
                 }
+                // 2. STICK DAMAGE (Slashes)
                 else if (stick != null)
                 {
-                    damageMultiplier = 5.0f; 
-                    damageCap = 25f; 
+                    // Ensure collision is strong enough to matter
+                    if (force > 1.5f)
+                    {
+                        // Stick damage is low: 2x force, capped at 10 HP max per hit
+                        float dmg = force * 2.0f;
+                        finalDamage = Mathf.Min(dmg, 10f); 
+                    }
                 }
+                // 3. BODY CHECK DAMAGE
                 else if (otherPlayer != null)
                 {
-                    var rb_instance = __instance.GetComponent<Rigidbody>();
-                    var rb_other = otherPlayer.GetComponent<Rigidbody>();
+                    if (otherPlayer.HasFallen) return;
 
-                    if (rb_instance != null && rb_other != null)
+                    if (force > 2.0f) 
                     {
-                        if (rb_instance.linearVelocity.magnitude >= rb_other.linearVelocity.magnitude)
-                        {
-                            return;
-                        }
+                        finalDamage = 25f; 
                     }
-                    
-                    damageMultiplier = 4.0f; 
-                    damageCap = 40f; 
                 }
-                else
-                {
-                    return; 
-                }
-                
-                if (force > 0.1f) 
-                {
-                    float finalDamage = force * damageMultiplier;
-                    finalDamage = Mathf.Min(finalDamage, damageCap);
 
+                // Apply the calculated damage
+                if (finalDamage > 0f)
+                {
                     if (__instance.Player != null)
                     {
                         var hp = __instance.Player.GetComponent<CTP_PlayerHealth>();
@@ -150,7 +190,7 @@ namespace CTP
                 }
             }
         }
-
+        
         [HarmonyPatch(typeof(Player), "Client_SetPlayerStateRpc")]
         public static class RpcInterception
         {
@@ -294,32 +334,114 @@ namespace CTP
         [HarmonyPatch(typeof(Puck), "FixedUpdate")]
         public static class PuckHazardPatch
         {
+            // Cache the bounds of the problem objects to avoid searching every frame
+            private static List<Bounds> _exclusionBounds = null;
+            private static float _lastCacheTime = 0f;
+            public static void ClearCache()
+            {
+                _exclusionBounds = null;
+            }            
+
             [HarmonyPostfix]
             public static void Postfix(Puck __instance)
             {
-                if (NetworkManager.Singleton.IsServer)
+                if (!NetworkManager.Singleton.IsServer) return;
+
+                bool shouldRespawn = false;
+                Vector3 puckPos = __instance.transform.position;
+
+                // 1. Existing Logic: Check if puck fell out of the world
+                if (puckPos.y < -5.0f)
                 {
-                    if (__instance.transform.position.y < -5.0f)
+                    shouldRespawn = true;
+                }
+                // 2. New Logic: Check if puck is inside specific stuck objects
+                else
+                {
+                    // Lazy load the bounds (retry every 5 seconds if list is empty, in case map loads late)
+                    if (_exclusionBounds == null || (_exclusionBounds.Count == 0 && Time.time - _lastCacheTime > 5.0f))
                     {
-                        var rb = __instance.GetComponent<Rigidbody>();
-                        if (rb != null)
+                        CacheExclusionZones();
+                    }
+
+                    if (_exclusionBounds != null)
+                    {
+                        for (int i = 0; i < _exclusionBounds.Count; i++)
                         {
-                            float treeExclusionMinX = -7.0f;
-                            float treeExclusionMaxX = 5.0f;
-                            float treeExclusionMinZ = -4.0f;
-                            float treeExclusionMaxZ = 8.0f;
-
-                            Vector3 spawnPosition;
-                            do
+                            if (_exclusionBounds[i].Contains(puckPos))
                             {
-                                spawnPosition = new Vector3(UnityEngine.Random.Range(-15f, 15f), 0.0038f, UnityEngine.Random.Range(-15f, 15f));
-                            } 
-                            while (spawnPosition.x >= treeExclusionMinX && spawnPosition.x <= treeExclusionMaxX &&
-                                   spawnPosition.z >= treeExclusionMinZ && spawnPosition.z <= treeExclusionMaxZ);
+                                shouldRespawn = true;
+                                break;
+                            }
+                        }
+                    }
+                }
 
-                            rb.position = spawnPosition;
-                            rb.linearVelocity = Vector3.zero;
-                            rb.angularVelocity = Vector3.zero;
+                // Execute Respawn Logic
+                if (shouldRespawn)
+                {
+                    var rb = __instance.GetComponent<Rigidbody>();
+                    if (rb != null)
+                    {
+                        // Define the exclusion zone (Tree area) to avoid spawning inside it
+                        float treeExclusionMinX = -7.0f;
+                        float treeExclusionMaxX = 5.0f;
+                        float treeExclusionMinZ = -4.0f;
+                        float treeExclusionMaxZ = 8.0f;
+
+                        Vector3 spawnPosition;
+                        int safeGuard = 0;
+                        do
+                        {
+                            spawnPosition = new Vector3(UnityEngine.Random.Range(-15f, 15f), 0.0038f, UnityEngine.Random.Range(-15f, 15f));
+                            safeGuard++;
+                        } 
+                        while (safeGuard < 50 && 
+                               spawnPosition.x >= treeExclusionMinX && spawnPosition.x <= treeExclusionMaxX &&
+                               spawnPosition.z >= treeExclusionMinZ && spawnPosition.z <= treeExclusionMaxZ);
+
+                        rb.position = spawnPosition;
+                        rb.linearVelocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        
+                        Debug.Log($"[CTP] Puck recycled from hazard zone to {spawnPosition}");
+                    }
+                }
+            }
+
+            private static void CacheExclusionZones()
+            {
+                _exclusionBounds = new List<Bounds>();
+                _lastCacheTime = Time.time;
+
+                string[] targetNames = new string[] 
+                { 
+                    "CaptureThePuck/Mound", 
+                    "CaptureThePuck/Mound_001", 
+                    "CaptureThePuck/Pine" 
+                };
+
+                // Search for the objects
+                foreach (string path in targetNames)
+                {
+                    GameObject obj = GameObject.Find(path);
+                    if (obj != null)
+                    {
+                        // Prefer Collider bounds (actual physics shape), fallback to Renderer bounds (visual shape)
+                        var col = obj.GetComponent<Collider>();
+                        if (col != null)
+                        {
+                            _exclusionBounds.Add(col.bounds);
+                            // Debug.Log($"[CTP] Added exclusion zone from Collider: {path}");
+                        }
+                        else
+                        {
+                            var rend = obj.GetComponent<Renderer>();
+                            if (rend != null)
+                            {
+                                _exclusionBounds.Add(rend.bounds);
+                                // Debug.Log($"[CTP] Added exclusion zone from Renderer: {path}");
+                            }
                         }
                     }
                 }
@@ -487,7 +609,7 @@ namespace CTP
         }
     }
 
-    public class CTPEnforcer : MonoBehaviour
+public class CTPEnforcer : MonoBehaviour
     {
         public static CTPEnforcer Instance { get; private set; }
         CTPConfig cfg;
@@ -495,11 +617,11 @@ namespace CTP
         GameObject spawnedMapInstance;
         PhysicsMaterial customBoardMaterial;
         PhysicsMaterial customIceMaterial;
+        PhysicsMaterial customPadMaterial;
         private static bool uiHealthBarInitialized = false;
 
         const int LAYER_ICE = 13;    
         const int LAYER_BOARDS = 12; 
-        
         const float MAP_SCALE = 1.0f; 
 
         void Awake()
@@ -509,23 +631,35 @@ namespace CTP
             UScene.sceneLoaded += OnSceneLoaded;
         }
 
-        void OnDestroy()
+        void OnDestroy() 
         {
             Instance = null;
             UScene.sceneLoaded -= OnSceneLoaded;
+            if (NetworkManager.Singleton != null)
+            {
+                NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+            }
         }
 
-        void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+         void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            spawnedMapInstance = null;
+            HP_Mechanic_Patches.PuckHazardPatch.ClearCache();
+
             if (!cfg.ModEnabled) return;
+            if (GameManager.Instance == null) return;
 
             if (!uiHealthBarInitialized)
             {
+                // 1. Create the HealthSyncer to handle the Ping/Pong verification
+                GameObject syncerGo = new GameObject("CTP_HealthSyncer_Manager");
+                syncerGo.AddComponent<CTP_HealthSyncer>();
+                // NOTE: We do NOT use DontDestroyOnLoad for this object specifically, 
+                // so it resets naturally when you switch servers.
+                
                 GameObject uiHealthBarGo = new GameObject("UIHealthBarController");
                 uiHealthBarGo.AddComponent<UIHealthBarController>();
                 DontDestroyOnLoad(uiHealthBarGo);
-
-                // CTP_HealthSyncer removed, logic moved to CTP_PlayerHealth via CustomMessaging
 
                 GameObject scoringMgr = new GameObject("CTP_ScoringManager");
                 scoringMgr.AddComponent<CTP_ScoringManager>();
@@ -533,16 +667,132 @@ namespace CTP
 
                 uiHealthBarInitialized = true;
             }
+            else
+            {
+                // If uiHealthBarInitialized is already true (scene reload), 
+                // we still need a fresh HealthSyncer because the old one was destroyed (it wasn't DDOL).
+                // Check if one exists, if not, make it.
+                if (CTP_HealthSyncer.Instance == null)
+                {
+                     GameObject syncerGo = new GameObject("CTP_HealthSyncer_Manager");
+                     syncerGo.AddComponent<CTP_HealthSyncer>();
+                }
+            }
 
             StartCoroutine(ProcessMapRoutine());
+            StartCoroutine(StickCollisionRoutine());
         }
+
+         private void SendHandshakeToAll()
+        {
+            if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+
+            var writer = new FastBufferWriter(0, Unity.Collections.Allocator.Temp);
+            // Send to everyone connected
+            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessageToAll("CTP_Handshake", writer);
+            
+            // Also hook into future connections
+            NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected; // prevent double sub
+            NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+        }
+
+        private void OnClientConnected(ulong clientId)
+        {
+            // Send handshake to the specific new client
+            var writer = new FastBufferWriter(0, Unity.Collections.Allocator.Temp);
+            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage("CTP_Handshake", clientId, writer);
+        }
+
+        IEnumerator StickCollisionRoutine()
+        {
+            // Run this loop constantly to catch new spawns / respawns
+            while (true)
+            {
+                yield return new WaitForSeconds(2.0f); // Check every 2 seconds
+
+                if (GameManager.Instance == null || GameManager.Instance.GameState.Value.Phase != GamePhase.Playing)
+                    continue;
+
+                EnableStickPlayerCollisions();
+            }
+        }
+
+        private void EnableStickPlayerCollisions()
+        {
+            try
+            {
+                Player[] allPlayers = UnityEngine.Object.FindObjectsByType<Player>(FindObjectsSortMode.None);
+
+                foreach (Player player in allPlayers)
+                {
+                    if (player == null || player.PlayerBody == null || player.PlayerBody.Stick == null) continue;
+
+                    // Get this player's stick colliders
+                    Collider[] stickColliders = player.PlayerBody.Stick.gameObject.GetComponentsInChildren<Collider>();
+                    
+                    // Get this player's own body colliders
+                    Collider[] ownBodyColliders = GetBodyColliders(player);
+
+                    // 1. Ensure player cannot hit THEMSELVES
+                    foreach (Collider stickCol in stickColliders)
+                    {
+                        foreach (Collider bodyCol in ownBodyColliders)
+                        {
+                            Physics.IgnoreCollision(stickCol, bodyCol, true);
+                        }
+                    }
+
+                    // 2. Enable collision with OTHER players
+                    foreach (Player otherPlayer in allPlayers)
+                    {
+                        if (otherPlayer == player || otherPlayer == null) continue;
+
+                        Collider[] otherBodyColliders = GetBodyColliders(otherPlayer);
+
+                        foreach (Collider stickCol in stickColliders)
+                        {
+                            foreach (Collider bodyCol in otherBodyColliders)
+                            {
+                                // FALSE means "Do NOT ignore collision" -> Enable Collision
+                                Physics.IgnoreCollision(stickCol, bodyCol, false);
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Suppress errors if players disconnect mid-loop
+                // Variable 'e' removed to fix warning
+            }
+        }
+
+        private Collider[] GetBodyColliders(Player player)
+        {
+            List<Collider> bodyColliders = new List<Collider>();
+            if (player.PlayerBody == null) return bodyColliders.ToArray();
+
+            Collider[] allColliders = player.GetComponentsInChildren<Collider>();
+            
+            // Filter out stick colliders
+            foreach (Collider col in allColliders)
+            {
+                bool isStick = false;
+                if (player.PlayerBody.Stick != null)
+                {
+                    if (col.transform.IsChildOf(player.PlayerBody.Stick.transform)) isStick = true;
+                }
+
+                if (!isStick) bodyColliders.Add(col);
+            }
+            return bodyColliders.ToArray();
+        }
+        // --- END Stick Collision Logic ---
 
         IEnumerator ProcessMapRoutine()
         {
             if (spawnedMapInstance != null) yield break;
-
             yield return new WaitForSeconds(1.0f);
-
             if (spawnedMapInstance == null) yield return StartCoroutine(LoadAndInstantiateMap());
 
             if (spawnedMapInstance != null)
@@ -565,12 +815,12 @@ namespace CTP
 
         IEnumerator LoadAndInstantiateMap()
         {
-            string modDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            string bundlePath = Path.Combine(modDir, cfg.BundleFileName);
-            if (!File.Exists(bundlePath)) bundlePath += ".bundle";
-
             if (loadedBundle == null)
             {
+                string modDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                string bundlePath = Path.Combine(modDir, cfg.BundleFileName);
+                if (!File.Exists(bundlePath)) bundlePath += ".bundle";
+
                 var bundleRequest = AssetBundle.LoadFromFileAsync(bundlePath);
                 yield return bundleRequest;
                 loadedBundle = bundleRequest.assetBundle;
@@ -581,11 +831,14 @@ namespace CTP
             GameObject prefab = loadedBundle.LoadAsset<GameObject>(cfg.PrefabName);
             if (prefab == null) prefab = loadedBundle.LoadAllAssets<GameObject>().FirstOrDefault();
 
-            spawnedMapInstance = Instantiate(prefab);
-            spawnedMapInstance.name = "[CaptureThePuck_Map]";
-            spawnedMapInstance.transform.localScale = Vector3.one * MAP_SCALE;
-            spawnedMapInstance.transform.position = Vector3.zero;
-            spawnedMapInstance.transform.rotation = Quaternion.identity;
+            if (prefab != null)
+            {
+                spawnedMapInstance = Instantiate(prefab);
+                spawnedMapInstance.name = "[CaptureThePuck_Map]";
+                spawnedMapInstance.transform.localScale = Vector3.one * MAP_SCALE;
+                spawnedMapInstance.transform.position = Vector3.zero;
+                spawnedMapInstance.transform.rotation = Quaternion.identity;
+            }
         }
 
         void CreatePhysicsMaterials()
@@ -602,13 +855,11 @@ namespace CTP
                     customBoardMaterial.staticFriction = vanillaMat.staticFriction;
                     customBoardMaterial.frictionCombine = vanillaMat.frictionCombine;
                     customBoardMaterial.bounceCombine = vanillaMat.bounceCombine;
-                    Log("Successfully duplicated vanilla board physics material and increased bounciness.");
                 }
             }
 
             if (customBoardMaterial == null)
             {
-                Log("Could not find vanilla board material, creating one with estimated values.");
                 customBoardMaterial = new PhysicsMaterial("CTP_Barrier");
                 customBoardMaterial.bounciness = 0.2f;
                 customBoardMaterial.dynamicFriction = 0.0f;
@@ -620,6 +871,13 @@ namespace CTP
             customIceMaterial = new PhysicsMaterial("CTP_Ice");
             customIceMaterial.dynamicFriction = 0f;
             customIceMaterial.staticFriction = 0f;
+
+            customPadMaterial = new PhysicsMaterial("CTP_CapturePad");
+            customPadMaterial.dynamicFriction = 0.8f;  
+            customPadMaterial.staticFriction = 0.8f;   
+            customPadMaterial.frictionCombine = PhysicsMaterialCombine.Maximum; 
+            customPadMaterial.bounciness = 0.0f;       
+            customPadMaterial.bounceCombine = PhysicsMaterialCombine.Minimum;
         }
 
         void HandleSkybox()
@@ -627,15 +885,7 @@ namespace CTP
             if (loadedBundle != null)
             {
                 Material skyboxMaterial = loadedBundle.LoadAsset<Material>("FS002_Night");
-                if (skyboxMaterial != null)
-                {
-                    RenderSettings.skybox = skyboxMaterial;
-                    Log("Successfully set skybox to FS002_Night.");
-                }
-                else
-                {
-                    Log("Could not find skybox material 'FS002_Night' in the asset bundle.");
-                }
+                if (skyboxMaterial != null) RenderSettings.skybox = skyboxMaterial;
             }
         }
 
@@ -647,11 +897,6 @@ namespace CTP
                 reverbZone.gameObject.SetActive(true);
                 reverbZone.transform.position = Vector3.zero;
                 reverbZone.maxDistance = 500f;
-                Log($"Adjusted and enlarged reverb zone '{reverbZone.name}' to {reverbZone.maxDistance}m.");
-            }
-            else
-            {
-                Log("Could not find vanilla reverb zone. Stick audio might sound flat.");
             }
         }
 
@@ -678,7 +923,6 @@ namespace CTP
         {
             GameObject bluePad = FindObjectIncludingInactive("BlueCapturePad") ?? FindObjectIncludingInactive("BlueZone");
             GameObject redPad = FindObjectIncludingInactive("RedCapturePad") ?? FindObjectIncludingInactive("RedZone");
-
             SetupCapturePad(bluePad, PlayerTeam.Blue);
             SetupCapturePad(redPad, PlayerTeam.Red);
         }
@@ -689,24 +933,21 @@ namespace CTP
             {
                 pad.gameObject.layer = LAYER_ICE; 
 
+                // Visual/Physics setup only (slippery ice settings)
+                // The actual "stickiness" is now handled by CTP_ScoringManager's math loop.
                 var allColliders = pad.GetComponentsInChildren<Collider>(true);
                 foreach (var c in allColliders)
                 {
-                    c.sharedMaterial = customIceMaterial; // Frictionless
-                    c.gameObject.layer = LAYER_ICE;       // Ice layer
-                    c.isTrigger = false;                  // No triggers
+                    c.sharedMaterial = customIceMaterial; 
+                    c.gameObject.layer = LAYER_ICE;       
+                    c.isTrigger = false;                  
                     
                     if (c is MeshCollider mc)
                     {
-                        mc.convex = false; // Pure mesh floor
+                        mc.convex = false; 
                     }
+                    
                 }
-
-                Log($"Setup capture pad for {team} on object {pad.name} (Physics/Visual Only)");
-            }
-            else
-            {
-                Log($"WARNING: Could not find capture pad for {team}");
             }
         }
 
@@ -716,7 +957,7 @@ namespace CTP
             foreach (var obj in allObjects)
             {
                 if (!obj.scene.IsValid()) continue;
-                if (obj.transform.root == spawnedMapInstance.transform) continue;
+                if (spawnedMapInstance != null && obj.transform.root == spawnedMapInstance.transform) continue;
                 if (obj.name == "Ice Bottom" || obj.name == "Ice Top") obj.SetActive(false);
             }
 
@@ -725,7 +966,7 @@ namespace CTP
             {
                 foreach (Transform child in levelRoot.transform)
                 {
-                    if (child.root == spawnedMapInstance.transform) continue;
+                    if (spawnedMapInstance != null && child.root == spawnedMapInstance.transform) continue;
                     if (child.name.Contains("Ice")) continue; 
                     if (IsCriticalObject(child.name)) continue;
                     child.gameObject.SetActive(false);
@@ -737,7 +978,7 @@ namespace CTP
             var allColliders = UnityEngine.Object.FindObjectsByType<Collider>(FindObjectsSortMode.None);
             foreach (var col in allColliders)
             {
-                if (col.transform.root == spawnedMapInstance.transform) continue;
+                if (spawnedMapInstance != null && col.transform.root == spawnedMapInstance.transform) continue;
                 if (col.GetComponentInParent<PlayerBodyV2>() != null) continue;
                 if (col.GetComponentInParent<Player>() != null) continue;
                 if (col.enabled) col.enabled = false;
@@ -750,7 +991,7 @@ namespace CTP
             foreach(var name in killList)
             {
                 var obj = GameObject.Find(name);
-                if (obj != null && obj.transform.root != spawnedMapInstance.transform) obj.SetActive(false);
+                if (obj != null && (spawnedMapInstance == null || obj.transform.root != spawnedMapInstance.transform)) obj.SetActive(false);
             }
         }
 
@@ -849,6 +1090,25 @@ namespace CTP
             StartCoroutine(DrowningRespawnCoroutine(player, delay));
         }
 
+        // Call this to start the 4-second timer for the puck swap
+        public void StartPuckSwapCountdown()
+        {
+            StartCoroutine(PuckSwapRoutine());
+        }
+
+        private IEnumerator PuckSwapRoutine()
+        {
+            // Wait for the Face-Off countdown (approx 4 seconds)
+            // The center puck will sit in the tree during this time.
+            yield return new WaitForSeconds(4.0f);
+
+            if (PuckManager.Instance != null)
+            {
+                // Trigger the swap logic located in TeamPucks
+                TeamPucks.SpawnScatterPucks(PuckManager.Instance);
+            }
+        }
+
         private IEnumerator DrowningRespawnCoroutine(Player player, float delay)
         {
             yield return new WaitForSeconds(delay);
@@ -862,10 +1122,7 @@ namespace CTP
             if (NetworkManager.Singleton.IsServer)
             {
                 var hp = player.GetComponent<CTP_PlayerHealth>();
-                if (hp != null)
-                {
-                    hp.ResetHealth();
-                }
+                if (hp != null) hp.ResetHealth();
 
                 Vector3 spawnPos = Vector3.zero;
                 if (player.Team.Value == PlayerTeam.Blue)
@@ -880,7 +1137,6 @@ namespace CTP
                 player.Server_RespawnCharacter(spawnPos, Quaternion.identity, player.Role.Value);
                 player.Client_SetPlayerStateRpc(PlayerState.Play, 0.1f);
 
-                // Send Respawn Message
                 var uiChat = UnityEngine.Object.FindFirstObjectByType<UIChat>();
                 if (uiChat != null)
                 {
