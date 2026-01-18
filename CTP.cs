@@ -815,6 +815,18 @@ public class CTPEnforcer : MonoBehaviour
 
         IEnumerator LoadAndInstantiateMap()
         {
+            if (loadedBundle != null)
+            {
+                try 
+                { 
+                    loadedBundle.Unload(true); 
+                } 
+                catch 
+                { 
+                }
+                loadedBundle = null;
+            }
+
             if (loadedBundle == null)
             {
                 string modDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);

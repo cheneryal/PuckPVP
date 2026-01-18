@@ -89,7 +89,7 @@ namespace CTP
             CheckWinCondition();
         }
 
-        // --- NEW: PHYSICS BRAKING LOOP ---
+        // --- PHYSICS BRAKING LOOP ---
         private void FixedUpdate()
         {
             if (!NetworkManager.Singleton.IsServer || isRoundOver) return;
@@ -159,7 +159,21 @@ namespace CTP
 
                 GamePhase currentPhase = GameManager.Instance.GameState.Value.Phase;
 
-                if (currentPhase == GamePhase.Warmup && lastPhase != GamePhase.Warmup) ResetGame();
+                // 1. Primary Reset: Standard reset on Warmup entry
+                if (currentPhase == GamePhase.Warmup && lastPhase != GamePhase.Warmup) 
+                {
+                    ResetGame();
+                }
+
+                // 2. Fallback Reset (THE FIX):
+                // If we are in FaceOff or Playing, but the system still thinks the previous round is over,
+                // we force a reset. This catches scenarios where Warmup was skipped or missed.
+                if ((currentPhase == GamePhase.FaceOff || currentPhase == GamePhase.Playing) && isRoundOver)
+                {
+                    Debug.Log("[CTP] Detected Stalled Game State (RoundOver=true during Play). Forcing Reset.");
+                    ResetGame();
+                }
+
                 if (currentPhase == GamePhase.PeriodOver && lastPhase == GamePhase.Playing) CheckWinnerAndEnd();
 
                 lastPhase = currentPhase;

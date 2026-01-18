@@ -58,4 +58,4 @@ jobs:
           fingerprint: ${{ secrets.SSH_TARGET_FINGERPRINT }}
           # We upload the whole "CTP" folder to the "Plugins" folder
           source: "CTP"
-          target: "/home/user/pubsrv_testing_1/Plugins/"
+          target: "/srv/puck/server1/Plugins/"

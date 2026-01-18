@@ -12,7 +12,9 @@ namespace CTP
         public float MaxHP = 100f;
         public float CurrentHP;
         public bool IsDead = false;
-        public float RespawnTime = 30f;
+        
+        // CHANGED: Reduced respawn time from 30f to 10f
+        public float RespawnTime = 10f;
 
         private Player player;
         private GameObject canvasRoot;
